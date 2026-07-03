@@ -16,7 +16,7 @@
 
 ## Proof of work
 
-https://github.com/user-attachments/assets/8f9a2b66-e291-44e6-8e6f-edecf65a7f4d
+https://github.com/user-attachments/assets/5b189a78-6ea0-4119-ad84-67bd1a2afb94
 
 ---
 
