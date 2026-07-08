@@ -55,8 +55,8 @@ Prediction markets for short-horizon BTC moves are noisy and fast. This project 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/polymarket-btc-15m-bot.git
-cd polymarket-btc-15m-bot
+git clone https://github.com/Gamma-Trading-Org/polymarket-trading-bot.git
+cd polymarket-trading-bot
 ```
 
 ### 2. Create a virtual environment
