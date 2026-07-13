@@ -1454,6 +1454,7 @@ class IntegratedBTCStrategy(Strategy):
                 "signal_score": float(pos.get("signal_score", 0.0) or 0.0),
                 "signal_confidence": float(pos.get("signal_confidence", 0.0) or 0.0),
                 "exit_in_flight": bool(pos.get("exit_in_flight", False)),
+                "is_simulation": bool(pos.get("is_paper", False)),
             })
         if open_count:
             pos = self._open_positions[next(iter(self._open_positions))]
@@ -1710,18 +1711,8 @@ class IntegratedBTCStrategy(Strategy):
                 market_slug=market_slug,
                 is_simulation=is_simulation,
             )
-            if hasattr(self.grafana_exporter, "record_dashboard_event"):
-                self.grafana_exporter.record_dashboard_event(
-                    "order_submitted",
-                    "上涨订单已提交" if direction.lower() == "long" else "下跌订单已提交",
-                    market_slug=market_slug,
-                    side="BUY",
-                    qty_tokens=qty,
-                    size_usd=float(size_usd),
-                    entry_price=held,
-                    poly_price=float(poly_price),
-                    is_simulation=is_simulation,
-                )
+            # 此处只是执行前指标快照，不是交易所委托。订单事件必须等到
+            # submit_order() 成功后再发布；模拟模式则只发布实际模拟成交。
         except Exception:
             pass
 
@@ -3312,6 +3303,37 @@ class IntegratedBTCStrategy(Strategy):
             usd_label = str(int(round(max_usd_amount * 100))).zfill(4)
             unique_id = f"BTC-15M-{usd_label}-{timestamp_ms}"
 
+            market_end_ts = 0
+            market_slug = ""
+            if 0 <= self.current_instrument_index < len(self.all_btc_instruments):
+                cur = self.all_btc_instruments[self.current_instrument_index]
+                market_end_ts = int(cur.get("end_timestamp", 0))
+                market_slug = str(cur.get("slug", ""))
+
+            signal_score = float(getattr(signal, "score", 0.0) or 0.0)
+            signal_conf = float(getattr(signal, "confidence", 0.0) or 0.0)
+
+            # 必须先登记再提交。IOC 市价单可能立即成交，如果反过来写，
+            # on_order_filled 会找不到订单元数据，从而无法创建对应持仓。
+            self._pending_orders[unique_id] = {
+                "side": "BUY",
+                "instrument_id": trade_instrument_id,
+                "direction": direction,
+                "size_usd": max_usd_amount,
+                "expected_price": float(current_price),
+                "ref_price": float(current_price),
+                "label": trade_label,
+                "market_end_ts": market_end_ts,
+                "market_slug": market_slug,
+                "ml_trade_id": ml_trade_id,
+                "signal_score": signal_score,
+                "signal_confidence": signal_conf,
+                "stop_loss_frac": self._stop_loss_frac,
+                "stop_loss_enabled": self._stop_loss_enabled,
+                "take_profit_frac": self._take_profit_frac,
+                "submitted_at": datetime.now(timezone.utc),
+            }
+
             order = self.order_factory.market(
                 instrument_id=trade_instrument_id,
                 order_side=side,
@@ -3323,6 +3345,18 @@ class IntegratedBTCStrategy(Strategy):
 
             self.submit_order(order)
             self._track_order_event("placed")
+            if self.grafana_exporter:
+                self.grafana_exporter.record_dashboard_event(
+                    "order_submitted",
+                    "实盘买入委托已提交",
+                    client_id=unique_id,
+                    market_slug=market_slug,
+                    side="BUY",
+                    direction=direction.upper(),
+                    requested_usd=max_usd_amount,
+                    reference_price=float(current_price),
+                    is_simulation=False,
+                )
 
             # Subscribe to ticks for the held token *before* the fill arrives so
             # the live stop-loss handler starts seeing prices immediately.
@@ -3420,48 +3454,13 @@ class IntegratedBTCStrategy(Strategy):
                 activity=True,
             )
 
-            market_end_ts = 0
-            market_slug = ""
-            if 0 <= self.current_instrument_index < len(self.all_btc_instruments):
-                cur = self.all_btc_instruments[self.current_instrument_index]
-                market_end_ts = int(cur.get("end_timestamp", 0))
-                market_slug = str(cur.get("slug", ""))
-
-            # Capture signal context for the LiveTrade record so live trades
-            # carry the same diagnostic fields as paper trades.
-            signal_score = float(getattr(signal, "score", 0.0) or 0.0)
-            signal_conf = float(getattr(signal, "confidence", 0.0) or 0.0)
-
-            # Stash metadata for on_order_filled so the risk engine can be
-            # updated with the actual fill price/size when the trade lands.
-            self._pending_orders[unique_id] = {
-                "side": "BUY",
-                "instrument_id": trade_instrument_id,
-                "direction": direction,
-                "size_usd": max_usd_amount,
-                "expected_price": float(current_price),
-                # Same value as expected_price — kept under the name
-                # on_order_filled looks up so slippage shows in the
-                # fill banner. Renaming here vs duplicating keeps the
-                # downstream code uncoupled from this dict's shape.
-                "ref_price": float(current_price),
-                "label": trade_label,
-                "market_end_ts": market_end_ts,
-                "market_slug": market_slug,
-                "ml_trade_id": ml_trade_id,
-                "signal_score": signal_score,
-                "signal_confidence": signal_conf,
-                "stop_loss_frac": self._stop_loss_frac,
-                "stop_loss_enabled": self._stop_loss_enabled,
-                "take_profit_frac": self._take_profit_frac,
-                "submitted_at": datetime.now(timezone.utc),
-            }
-
             # NOTE: do not call _track_order_event("placed") again here —
             # we already counted it right after submit_order() above. The
             # old code double-counted every placed order.
 
         except Exception as e:
+            if "unique_id" in locals():
+                self._pending_orders.pop(unique_id, None)
             logger.error(f"Error placing real order: {e}")
             import traceback
             traceback.print_exc()
@@ -3565,6 +3564,9 @@ class IntegratedBTCStrategy(Strategy):
         # have it (entry orders only — exits don't track ref price).
         is_exit = client_id in self._pending_exits
         pending_meta = self._pending_orders.get(client_id, {}) if not is_exit else {}
+        exit_entry_id = self._pending_exits.get(client_id) if is_exit else None
+        exit_position = self._open_positions.get(exit_entry_id, {}) if exit_entry_id else {}
+        event_meta = exit_position if is_exit else pending_meta
         ref_px = float(pending_meta.get("ref_price", 0.0) or 0.0)
         slip_str = "n/a"
         if not is_exit and ref_px > 0 and fill_price > 0:
@@ -3611,6 +3613,10 @@ class IntegratedBTCStrategy(Strategy):
                     fill_price=float(fill_price),
                     notional_usd=notional,
                     side="SELL" if is_exit else "BUY",
+                    direction=str(event_meta.get("direction", "")).upper(),
+                    market_slug=str(event_meta.get("market_slug", "")),
+                    entry_id=str(exit_entry_id or client_id),
+                    is_simulation=False,
                 )
         except Exception:
             pass
@@ -3689,6 +3695,7 @@ class IntegratedBTCStrategy(Strategy):
             "last_bid_post_settle_ts": None,
         }
         self._open_positions[client_id] = position
+        self._publish_dashboard_state()
 
         notional_usd = float(pending.get("size_usd", 0.0))
         market_slug_v = str(pending.get("market_slug", "") or "(unknown)")
