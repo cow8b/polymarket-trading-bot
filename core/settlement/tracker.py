@@ -87,6 +87,7 @@ class SettlementTracker:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._stop_event = threading.Event()
         self._ml_engine = None
         self._rest_warned = False
 
@@ -184,6 +185,7 @@ class SettlementTracker:
         if self._running:
             return
         self._running = True
+        self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._settlement_loop,
             daemon=True,
@@ -194,6 +196,13 @@ class SettlementTracker:
 
     def stop_tracking(self) -> None:
         self._running = False
+        self._stop_event.set()
+        if (
+            self._thread is not None
+            and self._thread.is_alive()
+            and threading.current_thread() is not self._thread
+        ):
+            self._thread.join(timeout=2.0)
 
     def register_trade(
         self,
@@ -234,7 +243,7 @@ class SettlementTracker:
                 self._check_settlements()
             except Exception as e:
                 logger.warning(f"Settlement check error: {e}")
-            time.sleep(30)
+            self._stop_event.wait(30)
 
     def _check_settlements(self) -> None:
         now_ts = datetime.now(timezone.utc).timestamp()

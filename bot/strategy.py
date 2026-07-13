@@ -86,6 +86,7 @@ class IntegratedBTCStrategy(Strategy):
 
         self.bot_start_time = datetime.now(timezone.utc)
         self.restart_after_minutes = 90
+        self._stopping = False
 
         self.instrument_id: Optional[InstrumentId] = None
         self.redis_client = redis_client
@@ -493,6 +494,7 @@ class IntegratedBTCStrategy(Strategy):
     # ── Strategy lifecycle ────────────────────────────────────────────────────
 
     def on_start(self) -> None:
+        self._stopping = False
         logger.info("=" * 80)
         logger.info("INTEGRATED BTC STRATEGY STARTED")
         logger.info("=" * 80)
@@ -1492,7 +1494,7 @@ class IntegratedBTCStrategy(Strategy):
             loop.close()
 
     async def _timer_loop(self) -> None:
-        while True:
+        while not self._stopping:
             uptime_minutes = (
                 (datetime.now(timezone.utc) - self.bot_start_time).total_seconds() / 60
             )
@@ -1586,7 +1588,12 @@ class IntegratedBTCStrategy(Strategy):
                 except Exception as _le:
                     logger.warning(f"Learning engine scheduled run failed: {_le}")
 
-            await asyncio.sleep(10)
+            for _ in range(10):
+                if self._stopping:
+                    break
+                await asyncio.sleep(1)
+
+        logger.info("Timer loop stopped")
 
     # ── Quote tick handler ────────────────────────────────────────────────────
 
@@ -3902,7 +3909,20 @@ class IntegratedBTCStrategy(Strategy):
             logger.error(f"Failed to start Grafana: {e}")
 
     def on_stop(self) -> None:
+        self._stopping = True
         logger.info("Integrated BTC strategy stopped")
+
+        for name, stop_fn in (
+            ("liquidation stream", self.liquidation_processor.stop_stream),
+            ("CVD stream", self.cvd_ob_processor.stop_stream),
+            ("settlement tracker", self.settlement_tracker.stop_tracking),
+            ("signal recorder", self.signal_recorder.stop),
+        ):
+            try:
+                stop_fn()
+                logger.info(f"Stopped {name}")
+            except Exception as e:
+                logger.warning(f"Failed to stop {name}: {e}")
 
         # Final settlement sweep for any position whose market has already ended.
         if self._open_positions:

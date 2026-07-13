@@ -56,6 +56,7 @@ class LiquidationProcessor(BaseSignalProcessor):
         self._events: deque = deque(maxlen=10_000)
         self._stream_thread: Optional[threading.Thread] = None
         self._running = False
+        self._stop_event = threading.Event()
         logger.info(
             f"Initialized Liquidation Processor: "
             f"window={window_seconds}s, min=${min_usd_threshold/1e6:.1f}M, "
@@ -66,6 +67,7 @@ class LiquidationProcessor(BaseSignalProcessor):
         if self._running:
             return
         self._running = True
+        self._stop_event.clear()
         self._stream_thread = threading.Thread(
             target=self._run_stream_loop, daemon=True, name="LiquidationStream"
         )
@@ -74,6 +76,13 @@ class LiquidationProcessor(BaseSignalProcessor):
 
     def stop_stream(self) -> None:
         self._running = False
+        self._stop_event.set()
+        if (
+            self._stream_thread is not None
+            and self._stream_thread.is_alive()
+            and threading.current_thread() is not self._stream_thread
+        ):
+            self._stream_thread.join(timeout=2.0)
 
     def _run_stream_loop(self) -> None:
         loop = asyncio.new_event_loop()
@@ -83,7 +92,7 @@ class LiquidationProcessor(BaseSignalProcessor):
                 loop.run_until_complete(self._stream())
             except Exception as e:
                 logger.warning(f"Liquidation stream error: {e} — reconnecting in 5s")
-                time.sleep(5)
+                self._stop_event.wait(5)
         loop.close()
 
     async def _stream(self) -> None:

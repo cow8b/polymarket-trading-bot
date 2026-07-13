@@ -67,6 +67,7 @@ class SignalRecorder:
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._stop_event = threading.Event()
         self._init_db()
 
     def _init_db(self) -> None:
@@ -105,6 +106,7 @@ class SignalRecorder:
         if self._running:
             return
         self._running = True
+        self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._resolve_loop,
             name="signal-recorder",
@@ -115,6 +117,13 @@ class SignalRecorder:
 
     def stop(self) -> None:
         self._running = False
+        self._stop_event.set()
+        if (
+            self._thread is not None
+            and self._thread.is_alive()
+            and threading.current_thread() is not self._thread
+        ):
+            self._thread.join(timeout=2.0)
 
     def record_cycle(
         self,
@@ -165,7 +174,7 @@ class SignalRecorder:
                 self._resolve_pending()
             except Exception as exc:
                 logger.debug(f"SignalRecorder resolve loop error: {exc}")
-            time.sleep(RESOLVE_INTERVAL_SEC)
+            self._stop_event.wait(RESOLVE_INTERVAL_SEC)
 
     def _resolve_pending(self) -> None:
         if self._price_fn is None:

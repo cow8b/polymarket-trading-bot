@@ -76,11 +76,17 @@ def _nautilus_logging_config(*, quiet_console: bool) -> LoggingConfig:
     )
 
 
+def _polymarket_proxy_url() -> str | None:
+    """Return the explicit Polymarket proxy URL, if configured."""
+    return (os.getenv("POLYMARKET_PROXY_URL") or "").strip() or None
+
+
 def init_redis():
     """Initialise Redis connection for live simulation-mode control."""
     try:
         client = redis.Redis(
             host=os.getenv("REDIS_HOST", "localhost"),
+            password=os.getenv("REDIS_PASSWORD", None),
             port=int(os.getenv("REDIS_PORT", 6379)),
             db=int(os.getenv("REDIS_DB", 2)),
             decode_responses=True,
@@ -155,6 +161,9 @@ def _boot_bot_node(
 
     sig_label = {0: "EOA", 1: "POLY_PROXY", 2: "POLY_GNOSIS_SAFE"}.get(sig_type, "UNKNOWN")
     logger.info(f"Polymarket wallet config: signature_type={sig_type} ({sig_label})")
+    proxy_url = _polymarket_proxy_url()
+    if proxy_url:
+        logger.info("Polymarket proxy enabled via POLYMARKET_PROXY_URL")
 
     poly_data_cfg = PolymarketDataClientConfig(
         private_key=os.getenv("POLYMARKET_PK"),
@@ -164,6 +173,7 @@ def _boot_bot_node(
         signature_type=sig_type,
         funder=funder,
         instrument_provider=instrument_cfg,
+        proxy_url=proxy_url,
     )
 
     poly_exec_cfg = PolymarketExecClientConfig(
@@ -174,6 +184,7 @@ def _boot_bot_node(
         signature_type=sig_type,
         funder=funder,
         instrument_provider=instrument_cfg,
+        proxy_url=proxy_url,
     )
 
     config = TradingNodeConfig(
@@ -323,6 +334,9 @@ def run_integrated_bot(
     sig_label = {0: "EOA", 1: "POLY_PROXY", 2: "POLY_GNOSIS_SAFE"}.get(sig_type, "UNKNOWN")
     logger.info(f"Polymarket wallet config: signature_type={sig_type} ({sig_label})")
     logger.info(f"  Funder (USDC holder): {funder or '(none — direct EOA)'}")
+    proxy_url = _polymarket_proxy_url()
+    if proxy_url:
+        logger.info("Polymarket proxy enabled via POLYMARKET_PROXY_URL")
 
     poly_data_cfg = PolymarketDataClientConfig(
         private_key=os.getenv("POLYMARKET_PK"),
@@ -332,6 +346,7 @@ def run_integrated_bot(
         signature_type=sig_type,
         funder=funder,
         instrument_provider=instrument_cfg,
+        proxy_url=proxy_url,
     )
 
     poly_exec_cfg = PolymarketExecClientConfig(
@@ -342,6 +357,7 @@ def run_integrated_bot(
         signature_type=sig_type,
         funder=funder,
         instrument_provider=instrument_cfg,
+        proxy_url=proxy_url,
     )
 
     config = TradingNodeConfig(

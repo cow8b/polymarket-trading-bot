@@ -60,6 +60,7 @@ class CVDOrderBookProcessor(BaseSignalProcessor):
         self._trade_events: deque = deque(maxlen=100_000)
         self._stream_thread: Optional[threading.Thread] = None
         self._running = False
+        self._stop_event = threading.Event()
         self._ob_cache: Optional[Dict] = None
         self._ob_cache_time: Optional[datetime] = None
         logger.info(
@@ -71,6 +72,7 @@ class CVDOrderBookProcessor(BaseSignalProcessor):
         if self._running:
             return
         self._running = True
+        self._stop_event.clear()
         self._stream_thread = threading.Thread(
             target=self._run_stream_loop, daemon=True, name="CVDStream"
         )
@@ -79,6 +81,13 @@ class CVDOrderBookProcessor(BaseSignalProcessor):
 
     def stop_stream(self) -> None:
         self._running = False
+        self._stop_event.set()
+        if (
+            self._stream_thread is not None
+            and self._stream_thread.is_alive()
+            and threading.current_thread() is not self._stream_thread
+        ):
+            self._stream_thread.join(timeout=2.0)
 
     def _run_stream_loop(self) -> None:
         loop = asyncio.new_event_loop()
@@ -88,7 +97,7 @@ class CVDOrderBookProcessor(BaseSignalProcessor):
                 loop.run_until_complete(self._stream())
             except Exception as e:
                 logger.warning(f"CVD stream error: {e} — reconnecting in 5s")
-                time.sleep(5)
+                self._stop_event.wait(5)
         loop.close()
 
     async def _stream(self) -> None:
