@@ -405,6 +405,7 @@ class IntegratedBTCStrategy(Strategy):
         self.price_history: list = []
         self.max_history = 100
         self.paper_trades: List[PaperTrade] = []
+        self._load_trade_history()
         # Open paper positions live in ``_open_positions`` with is_paper=True so
         # exit timing, sizing, and settlement mirror the live path.
 
@@ -426,6 +427,40 @@ class IntegratedBTCStrategy(Strategy):
         logger.info("=" * 80)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _load_trade_history(self) -> None:
+        """恢复已持久化交易用于累计统计和重启后复盘。
+
+        历史 PENDING 记录只作为审计记录恢复，不重新创建活动仓位；活动仓位
+        需要交易所订单状态和实时订阅，盲目恢复会造成重复退出订单。
+        """
+        loaders = (
+            (Path("paper_trades.json"), PaperTrade, "paper_trades"),
+            (Path("live_trades.json"), LiveTrade, "live_trades"),
+        )
+        for path, model, attr in loaders:
+            if not path.exists():
+                continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(raw, list):
+                    raise ValueError("根节点必须是数组")
+                restored = []
+                for item in raw:
+                    if not isinstance(item, dict):
+                        continue
+                    try:
+                        restored.append(model.from_dict(item))
+                    except Exception as exc:
+                        logger.warning(f"跳过损坏的历史交易 {path.name}: {exc}")
+                setattr(self, attr, restored)
+                logger.info(f"已从 {path.name} 恢复 {len(restored)} 条交易记录")
+            except Exception as exc:
+                logger.warning(f"无法恢复 {path.name}: {exc}")
+        self._live_session_num = max(
+            (trade.session_trade_num for trade in self.live_trades),
+            default=0,
+        )
 
     def _seconds_to_next_15min_boundary(self) -> float:
         now_ts = datetime.now(timezone.utc).timestamp()
@@ -1468,12 +1503,46 @@ class IntegratedBTCStrategy(Strategy):
             signal = "—"
             confidence = "—"
 
-        # Performance from in-memory trades (paper + live).
-        all_trades = list(self.paper_trades) + list(self.live_trades)
+        # 当前模式的持久化交易账本是驾驶舱唯一收益来源。不能使用传统
+        # long/short 绩效公式，因为 SHORT 在这里是买入 NO 代币。
+        all_trades = (
+            list(self.paper_trades)
+            if self.current_simulation_mode
+            else list(self.live_trades)
+        )
         settled = [t for t in all_trades if t.outcome in ("WIN", "LOSS")]
         wins = sum(1 for t in settled if t.outcome == "WIN")
         win_rate = (wins / len(settled) * 100) if settled else 0.0
         total_pnl = sum(float(t.pnl_usd) for t in all_trades)
+        total_volume_usd = sum(
+            float(t.size_usd)
+            + (
+                float(t.filled_qty) * float(t.exit_price)
+                if t.outcome in ("WIN", "LOSS", "BREAKEVEN", "UNRESOLVED")
+                else 0.0
+            )
+            for t in all_trades
+        )
+        unrealized_pnl = sum(float(item["unrealized_pnl"]) for item in positions)
+        starting_balance = float(getattr(self.risk_engine, "_starting_balance", 0.0) or 0.0)
+        wallet_balance = starting_balance + total_pnl + unrealized_pnl
+        running_balance = starting_balance
+        peak_balance = starting_balance
+        max_drawdown_pct = 0.0
+        for trade in sorted(settled, key=lambda item: item.timestamp):
+            running_balance += float(trade.pnl_usd)
+            peak_balance = max(peak_balance, running_balance)
+            if peak_balance > 0:
+                max_drawdown_pct = max(
+                    max_drawdown_pct,
+                    (peak_balance - running_balance) / peak_balance * 100,
+                )
+        trade_history = []
+        for trade in all_trades[-200:]:
+            row = trade.to_dict()
+            row["mode"] = "simulation" if self.current_simulation_mode else "live"
+            row["restored"] = True
+            trade_history.append(row)
 
         risk = self.risk_engine.get_risk_summary()
         ml_stats = self.ml_engine.get_stats()
@@ -1522,8 +1591,12 @@ class IntegratedBTCStrategy(Strategy):
             "wins": wins,
             "win_rate": win_rate,
             "total_pnl": total_pnl,
-            "drawdown_pct": risk.get("balance", {}).get("drawdown_pct", 0.0),
-            "wallet_balance": risk.get("balance", {}).get("current"),
+            "total_volume_usd": total_volume_usd,
+            "unrealized_pnl": unrealized_pnl,
+            "starting_balance": starting_balance,
+            "wallet_balance": wallet_balance,
+            "trade_history": trade_history,
+            "drawdown_pct": max_drawdown_pct,
             "bot_start": bot_start,
         }
 
@@ -1594,7 +1667,8 @@ class IntegratedBTCStrategy(Strategy):
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "stages": [],
             }
-        self._set_decision_stage("DECISION START", "启动决策周期")
+        # 紧接着的 DECISION START 日志会发布首个可视化阶段；这里不重复
+        # 发布，避免驾驶舱路径与事件流出现两个相同的起点。
         mode = "SIM" if is_simulation else "LIVE"
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         sep = "═" * self._STEP_BOX_WIDTH
@@ -2964,6 +3038,7 @@ class IntegratedBTCStrategy(Strategy):
                 size=Decimal(str(size_usd)),
                 entry_price=fill_price,
                 direction=direction,
+                long_token=True,
             )
         except Exception as e:
             logger.warning(f"Failed to record paper fill in risk engine: {e}")
@@ -3128,6 +3203,7 @@ class IntegratedBTCStrategy(Strategy):
                 signal_confidence=position.get("signal_confidence", 0.0),
                 metadata={
                     "simulated": True,
+                    "long_token": True,
                     "num_signals": position.get("num_signals", 1),
                     "fusion_score": position.get("signal_score", 0.0),
                     "ml_p_up": position.get("ml_p_up", 0.0),
@@ -3244,8 +3320,10 @@ class IntegratedBTCStrategy(Strategy):
     def _save_paper_trades(self) -> None:
         try:
             trades_data = [t.to_dict() for t in self.paper_trades]
-            with open("paper_trades.json", "w") as f:
-                json.dump(trades_data, f, indent=2)
+            path = Path("paper_trades.json")
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(trades_data, indent=2), encoding="utf-8")
+            tmp.replace(path)
         except Exception as e:
             logger.error(f"Failed to save paper trades: {e}")
 
@@ -3646,6 +3724,7 @@ class IntegratedBTCStrategy(Strategy):
                 size=Decimal(str(pending["size_usd"])),
                 entry_price=fill_price,
                 direction=pending["direction"],
+                long_token=True,
             )
         except Exception as e:
             logger.warning(f"Failed to record live fill in risk engine: {e}")
@@ -3865,6 +3944,7 @@ class IntegratedBTCStrategy(Strategy):
                 signal_confidence=float(position.get("signal_confidence", 0.0) or 0.0),
                 metadata={
                     "simulated": False,
+                    "long_token": True,
                     "close_reason": close_reason,
                     "market_slug": position.get("market_slug", ""),
                     "label": position.get("label", ""),

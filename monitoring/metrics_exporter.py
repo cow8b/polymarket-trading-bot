@@ -66,11 +66,12 @@ import json
 import os
 import sys
 import threading
+import time
 import urllib.parse
 from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -266,8 +267,15 @@ class GrafanaMetricsExporter:
         self._dashboard_events = deque(maxlen=200)
         self._dashboard_event_sequence = 0
         self._is_running = False
-        self._server: Optional[HTTPServer] = None
+        self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
+        self._state_path = Path(
+            os.getenv("DASHBOARD_STATE_PATH", "runtime/dashboard/state.json")
+        )
+        self._persist_lock = threading.Lock()
+        self._last_persist_at = 0.0
+        self._last_history_at = 0.0
+        self._load_dashboard_state()
 
         logger.info(
             f"Initialized Grafana Metrics Exporter "
@@ -713,8 +721,73 @@ class GrafanaMetricsExporter:
                     "payload": payload,
                 }
                 self._dashboard_events.append(event)
+            self._persist_dashboard_state(force=True)
         except Exception as e:
             logger.debug(f"record_dashboard_event error: {e}")
+
+    def _load_dashboard_state(self) -> None:
+        """恢复驾驶舱时间序列和事件，保证重启后仍可复盘。"""
+        if not self._state_path.exists():
+            return
+        try:
+            raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+            history = raw.get("history", []) if isinstance(raw, dict) else []
+            events = raw.get("events", []) if isinstance(raw, dict) else []
+            if isinstance(history, list):
+                # 旧版本会按每个行情 tick 采样。重启加载时按秒合并，防止
+                # 数千个重复点在几分钟内挤掉真正需要复盘的时间范围。
+                compacted: Dict[str, dict] = {}
+                for index, item in enumerate(history):
+                    if not isinstance(item, dict):
+                        continue
+                    ts = str(item.get("ts", ""))
+                    key = ts[:19] if ts else f"legacy-{index}"
+                    compacted[key] = item
+                self._history.extend(compacted.values())
+            if isinstance(events, list):
+                self._dashboard_events.extend(item for item in events if isinstance(item, dict))
+            self._dashboard_event_sequence = max(
+                [int(item.get("sequence", 0) or 0) for item in self._dashboard_events] + [0]
+            )
+            logger.info(
+                f"已恢复驾驶舱历史：{len(self._history)} 个采样，"
+                f"{len(self._dashboard_events)} 条事件"
+            )
+        except Exception as exc:
+            logger.warning(f"无法恢复驾驶舱状态 {self._state_path}: {exc}")
+
+    def _persist_dashboard_state(self, *, force: bool = False) -> None:
+        """原子保存驾驶舱状态；高频行情最多每 5 秒写盘一次。"""
+        now = time.monotonic()
+        if not force and now - self._last_persist_at < 5.0:
+            return
+        if not self._persist_lock.acquire(blocking=False):
+            return
+        try:
+            with self._history_lock:
+                history = list(self._history)
+            with self._events_lock:
+                events = list(self._dashboard_events)
+                sequence = self._dashboard_event_sequence
+            payload = {
+                "version": 1,
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "event_sequence": sequence,
+                "history": history,
+                "events": events,
+            }
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(".json.tmp")
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            tmp.replace(self._state_path)
+            self._last_persist_at = now
+        except Exception as exc:
+            logger.warning(f"无法保存驾驶舱状态 {self._state_path}: {exc}")
+        finally:
+            self._persist_lock.release()
 
     # ──────────────────────────────────────────────────────────────────────────
     # Built-in dashboard JSON API
@@ -730,13 +803,18 @@ class GrafanaMetricsExporter:
         limit = max(1, min(limit, self._history.maxlen or 600))
         with self._history_lock:
             points = list(self._history)[-limit:]
-        return {
+        snapshot = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "points": points,
         }
+        return snapshot
 
     def _record_dashboard_history(self) -> None:
         """Append one compact dashboard sample for the built-in front-end."""
+        now = time.monotonic()
+        if now - self._last_history_at < max(1.0, float(self.update_interval)):
+            return
+        self._last_history_at = now
         try:
             snapshot = self.dashboard_snapshot()
             with self._live_state_lock:
@@ -754,6 +832,7 @@ class GrafanaMetricsExporter:
                     "quote_updated_at",
                     "orderbook_updated_at",
                     "mode",
+                    "total_volume_usd",
                 )
             }
             point = {
@@ -777,6 +856,7 @@ class GrafanaMetricsExporter:
             }
             with self._history_lock:
                 self._history.append(point)
+            self._persist_dashboard_state()
         except Exception as e:
             logger.debug(f"Dashboard history update failed: {e}")
 
@@ -832,7 +912,7 @@ class GrafanaMetricsExporter:
         with self._events_lock:
             dashboard_events = list(self._dashboard_events)
 
-        return {
+        snapshot = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "live_state": live_state,
             "dashboard_events": dashboard_events,
@@ -919,6 +999,43 @@ class GrafanaMetricsExporter:
                 "is_simulation": v("trading_last_order_is_simulation"),
             },
         }
+        # 策略账本保存的是实际持有 YES/NO 代币后的成交结果，是驾驶舱
+        # 收益、胜率和仓位的权威来源。Prometheus PerformanceTracker 仍可
+        # 服务通用指标，但不能覆盖二元代币账本。
+        if "total_pnl" in live_state:
+            ledger_pnl = float(live_state.get("total_pnl", 0.0) or 0.0)
+            ledger_unrealized = float(live_state.get("unrealized_pnl", 0.0) or 0.0)
+            starting_balance = float(live_state.get("starting_balance", 0.0) or 0.0)
+            wallet_balance = float(
+                live_state.get(
+                    "wallet_balance",
+                    starting_balance + ledger_pnl + ledger_unrealized,
+                ) or 0.0
+            )
+            snapshot["portfolio"].update({
+                "current_capital": wallet_balance,
+                "total_pnl": ledger_pnl,
+                "unrealized_pnl": ledger_unrealized,
+                "roi": (ledger_pnl / starting_balance * 100) if starting_balance else 0.0,
+            })
+            snapshot["trade_stats"]["win_rate"] = float(
+                live_state.get("win_rate", 0.0) or 0.0
+            )
+            history_count = len(live_state.get("trade_history", []) or [])
+            completed = int(live_state.get("completed_trades", 0) or 0)
+            wins = int(live_state.get("wins", 0) or 0)
+            positions = live_state.get("positions", []) or []
+            snapshot["execution"].update({
+                "trades_closed_total": completed,
+                "winning_trades_total": wins,
+                "losing_trades_total": max(0, completed - wins),
+                "open_positions": len(positions),
+                "total_exposure": sum(float(p.get("size_usd", 0.0) or 0.0) for p in positions),
+                "orders_filled_total": max(
+                    snapshot["execution"]["orders_filled_total"], history_count
+                ),
+            })
+        return snapshot
 
     # ──────────────────────────────────────────────────────────────────────────
     # Server lifecycle
@@ -931,7 +1048,8 @@ class GrafanaMetricsExporter:
             return
         try:
             MetricsHandler.exporter = self
-            self._server = HTTPServer(("0.0.0.0", self.port), MetricsHandler)
+            self._server = ThreadingHTTPServer(("0.0.0.0", self.port), MetricsHandler)
+            self._server.daemon_threads = True
             self._thread = threading.Thread(
                 target=self._server.serve_forever, daemon=True
             )
@@ -955,6 +1073,7 @@ class GrafanaMetricsExporter:
     def stop_sync(self) -> None:
         """同步停止 HTTP 服务，允许从已有事件循环的策略回调中调用。"""
         self._is_running = False
+        self._persist_dashboard_state(force=True)
         if self._server:
             self._server.shutdown()
             self._server.server_close()

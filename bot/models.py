@@ -79,6 +79,34 @@ class PaperTrade:
             "session_trade_num": self.session_trade_num,
         }
 
+    @classmethod
+    def from_dict(cls, raw: dict) -> "PaperTrade":
+        """从持久化 JSON 恢复交易；文件中的 pnl_pct 使用百分数。"""
+        return cls(
+            trade_id=str(raw.get("trade_id", "")),
+            timestamp=datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00")),
+            direction=str(raw.get("direction", "")).upper(),
+            size_usd=float(raw.get("size_usd", 0.0) or 0.0),
+            entry_price=float(raw.get("entry_price", 0.0) or 0.0),
+            exit_price=float(raw.get("exit_price", 0.0) or 0.0),
+            pnl_usd=float(raw.get("pnl_usd", 0.0) or 0.0),
+            pnl_pct=float(raw.get("pnl_pct", 0.0) or 0.0) / 100.0,
+            outcome=str(raw.get("outcome", "PENDING")),
+            signal_score=float(raw.get("signal_score", 0.0) or 0.0),
+            signal_confidence=float(raw.get("signal_confidence", 0.0) or 0.0),
+            num_signals=int(raw.get("num_signals", 0) or 0),
+            ml_p_up=float(raw.get("ml_p_up", 0.0) or 0.0),
+            ml_edge=float(raw.get("ml_edge", 0.0) or 0.0),
+            market_slug=str(raw.get("market_slug", "")),
+            btc_spot_price=float(raw.get("btc_spot_price", 0.0) or 0.0),
+            vol_regime=str(raw.get("vol_regime", "")),
+            funding_rate=float(raw.get("funding_rate", 0.0) or 0.0),
+            filled_qty=float(raw.get("filled_qty", 0.0) or 0.0),
+            close_reason=str(raw.get("close_reason", "")),
+            ml_trade_id=raw.get("ml_trade_id"),
+            session_trade_num=int(raw.get("session_trade_num", 0) or 0),
+        )
+
 
 @dataclass
 class LiveTrade:
@@ -137,6 +165,30 @@ class LiveTrade:
             "exit_order_id": self.exit_order_id,
             "session_trade_num": self.session_trade_num,
         }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "LiveTrade":
+        """从持久化 JSON 恢复已平仓实盘交易。"""
+        return cls(
+            trade_id=str(raw.get("trade_id", "")),
+            ml_trade_id=raw.get("ml_trade_id"),
+            timestamp=datetime.fromisoformat(str(raw["timestamp"]).replace("Z", "+00:00")),
+            closed_at=datetime.fromisoformat(str(raw["closed_at"]).replace("Z", "+00:00")),
+            direction=str(raw.get("direction", "")).upper(),
+            label=str(raw.get("label", "")),
+            market_slug=str(raw.get("market_slug", "")),
+            size_usd=float(raw.get("size_usd", 0.0) or 0.0),
+            filled_qty=float(raw.get("filled_qty", 0.0) or 0.0),
+            entry_price=float(raw.get("entry_price", 0.0) or 0.0),
+            exit_price=float(raw.get("exit_price", 0.0) or 0.0),
+            pnl_usd=float(raw.get("pnl_usd", 0.0) or 0.0),
+            pnl_pct=float(raw.get("pnl_pct", 0.0) or 0.0) / 100.0,
+            outcome=str(raw.get("outcome", "UNRESOLVED")),
+            close_reason=str(raw.get("close_reason", "")),
+            entry_order_id=raw.get("entry_order_id"),
+            exit_order_id=raw.get("exit_order_id"),
+            session_trade_num=int(raw.get("session_trade_num", 0) or 0),
+        )
 
 
 def _make_stub_signal(direction: str, ml_p_up: Optional[float] = None):

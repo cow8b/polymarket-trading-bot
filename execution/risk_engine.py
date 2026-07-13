@@ -275,6 +275,7 @@ class RiskEngine:
         direction: str,
         stop_loss: Optional[Decimal] = None,
         take_profit: Optional[Decimal] = None,
+        long_token: bool = False,
     ) -> None:
         """
         Add a new position to track.
@@ -286,6 +287,7 @@ class RiskEngine:
             direction: "long" or "short"
             stop_loss: Stop loss price
             take_profit: Take profit price
+            long_token: 是否按持有预测代币多头计算盈亏
         """
         position = PositionRisk(
             position_id=position_id,
@@ -299,6 +301,7 @@ class RiskEngine:
             time_held=0.0,
             metadata={
                 "direction": direction,
+                "long_token": long_token,
                 "entry_time": datetime.now(),
             }
         )
@@ -332,7 +335,7 @@ class RiskEngine:
         # Calculate P&L
         direction = position.metadata.get("direction", "long")
         
-        if direction == "long":
+        if direction == "long" or position.metadata.get("long_token", False):
             pnl_pct = (current_price - position.entry_price) / position.entry_price
         else:  # short
             pnl_pct = (position.entry_price - current_price) / position.entry_price
@@ -386,7 +389,7 @@ class RiskEngine:
         # Calculate final P&L
         direction = position.metadata.get("direction", "long")
         
-        if direction == "long":
+        if direction == "long" or position.metadata.get("long_token", False):
             pnl_pct = (exit_price - position.entry_price) / position.entry_price
         else:
             pnl_pct = (position.entry_price - exit_price) / position.entry_price
@@ -431,7 +434,7 @@ class RiskEngine:
         
         direction = position.metadata.get("direction", "long")
         
-        if direction == "long":
+        if direction == "long" or position.metadata.get("long_token", False):
             return current_price <= position.stop_loss
         else:  # short
             return current_price >= position.stop_loss
@@ -443,7 +446,7 @@ class RiskEngine:
         
         direction = position.metadata.get("direction", "long")
         
-        if direction == "long":
+        if direction == "long" or position.metadata.get("long_token", False):
             return current_price >= position.take_profit
         else:  # short
             return current_price <= position.take_profit

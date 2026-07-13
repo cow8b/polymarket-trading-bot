@@ -125,7 +125,11 @@ class PerformanceTracker:
         signal_confidence: float = 0.0,
         metadata: Dict[str, Any] = None,
     ) -> Trade:
-        if direction == "long":
+        metadata = metadata or {}
+        # Polymarket 的 LONG/SHORT 表示预测方向，不代表传统资产多空。
+        # 无论买 YES 还是买 NO，实际持有的都是一个代币多头，收益均为
+        # qty * (exit - entry)。调用方用 long_token 标明这种语义。
+        if direction == "long" or metadata.get("long_token", False):
             pnl_pct = (exit_price - entry_price) / entry_price
         else:
             pnl_pct = (entry_price - exit_price) / entry_price
@@ -145,7 +149,7 @@ class PerformanceTracker:
             duration_seconds=duration,
             signal_score=signal_score,
             signal_confidence=signal_confidence,
-            metadata=metadata or {},
+            metadata=metadata,
         )
 
         self._trades.append(trade)
