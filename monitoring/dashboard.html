@@ -641,7 +641,7 @@
         const tag = pos.exit_in_flight ? "退出中" : (dir.includes("LONG") ? "上涨" : (dir.includes("SHORT") ? "下跌" : "持仓"));
         const posId = shortId(pos.id);
         const mode = pos.is_simulation ? "模拟" : "实盘";
-        rows.push(`<div class="pos-row" title="订单 ${pos.id || '—'}"><span>${dir.includes("SHORT") ? "DOWN" : "UP"}</span><span class="tag">${tag}</span><span>${mode} #${posId} · ${fmt.num(pos.qty_tokens, 4)} 枚 · 成交 ${fmt.num(pos.entry_price, 4)} · 可卖 ${hasValue(pos.last_bid) ? fmt.num(pos.last_bid, 4) : "—"}</span><span class="${pnl >= 0 ? "green" : "red"}">${fmt.usd(pnl)}</span></div>`);
+        rows.push(`<div class="pos-row" title="订单 ${pos.id || '—'}"><span>${dir.includes("SHORT") ? "DOWN" : "UP"}</span><span class="tag">${tag}</span><span>${mode} #${posId} · ${fmt.num(pos.qty_tokens, 4)} 股 · 成交 ${fmt.num(pos.entry_price, 4)} · 可卖 ${hasValue(pos.last_bid) ? fmt.num(pos.last_bid, 4) : "—"}</span><span class="${pnl >= 0 ? "green" : "red"}">${fmt.usd(pnl)}</span></div>`);
       }
       $("positions").innerHTML = rows.join("");
     }
@@ -664,7 +664,7 @@
         `<div class="stream-line muted">卖盘=你可买；买盘=你可卖 · ${String(book.updated_at || "").slice(11,19)} UTC</div>`,
       ];
       const rows = [...bookRows("UP", up), ...bookRows("DOWN", down)];
-      $("book").innerHTML = `<div class="price-stream">${stream.join("")}</div><div class="book-side"><div class="book-head"><span>代币</span><span>盘口含义</span><span>价格</span><span>数量</span><span>金额</span></div>${rows.join("")}</div>`;
+      $("book").innerHTML = `<div class="price-stream">${stream.join("")}</div><div class="book-side"><div class="book-head"><span>方向</span><span>盘口含义</span><span>价格</span><span>股数</span><span>金额</span></div>${rows.join("")}</div>`;
     }
     function bookRows(token, side) {
       const asks = Array.isArray(side.asks) ? side.asks.slice(0, 2) : [];
@@ -731,7 +731,7 @@
           directionText,
           p.is_simulation === true ? "模拟" : (p.is_simulation === false ? "实盘" : ""),
           orderId !== "—" ? `#${orderId}` : "",
-          hasValue(p.qty_tokens) ? `数量 ${fmt.num(p.qty_tokens, 4)}` : "",
+          hasValue(p.qty_tokens) ? `数量 ${fmt.num(p.qty_tokens, 4)} 股` : "",
           hasValue(p.fill_price) ? `${type.startsWith("history_") ? "卖出价" : "成交价"} ${fmt.num(p.fill_price, 4)}` : "",
           type.startsWith("history_") && hasValue(p.entry_price) ? `买入价 ${fmt.num(p.entry_price, 4)}` : "",
           hasValue(p.reference_price) && !hasValue(p.fill_price) ? `参考价 ${fmt.num(p.reference_price, 4)}` : "",

@@ -363,7 +363,7 @@ class PolymarketBTCIntegration:
             )
             
             # Submit order
-            logger.info(f"Submitting order: {order_side.name} {token_qty:.6f} tokens")
+            logger.info(f"Submitting order: {order_side.name} {token_qty:.6f} shares")
             logger.info(f"  Estimated cost: ${size_usd:.2f}")
             logger.info(f"  Price: ${float(current_price):.4f}")
             
