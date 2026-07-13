@@ -12,12 +12,15 @@ import json
 import math
 import os
 import random
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
+
+import httpx
 
 from loguru import logger
 from nautilus_trader.model.data import QuoteTick
@@ -124,6 +127,31 @@ class IntegratedBTCStrategy(Strategy):
         self._decision_cycle_counter: int = 0
         self._current_cycle_id: Optional[int] = None
         self._current_cycle_outcome: str = ""
+
+        # 内置驾驶舱只消费真实数据。行情采集与策略线程隔离，避免前端轮询
+        # 触发外部网络请求或阻塞交易决策。
+        self._dashboard_lock = threading.RLock()
+        self._dashboard_stop_event = threading.Event()
+        self._dashboard_thread: Optional[threading.Thread] = None
+        self._grafana_thread: Optional[threading.Thread] = None
+        self._dashboard_market_data: Dict[str, Any] = {
+            "updated_at": None,
+            "candles_updated_at": None,
+            "orderbook_updated_at": None,
+            "eth_price": None,
+            "candles": [],
+            "orderbook": {},
+            "last_error": "",
+        }
+        self._quote_updated_at: Optional[str] = None
+        self._decision_state: Dict[str, Any] = {
+            "cycle_id": None,
+            "status": "idle",
+            "current_stage": None,
+            "outcome": "",
+            "updated_at": None,
+            "stages": [],
+        }
 
         # ── Live position / exit management ─────────────────────────────────
         # Pending BUY orders awaiting their first fill report.
@@ -268,6 +296,7 @@ class IntegratedBTCStrategy(Strategy):
 
         self._tick_buffer: deque = deque(maxlen=500)
         self._yes_token_id: Optional[str] = None
+        self._no_token_id: Optional[str] = None
 
         # ── Signal processors ─────────────────────────────────────────────────
         try:
@@ -493,6 +522,167 @@ class IntegratedBTCStrategy(Strategy):
 
     # ── Strategy lifecycle ────────────────────────────────────────────────────
 
+    @staticmethod
+    def _dashboard_book_levels(levels: list, *, reverse: bool) -> list:
+        """规范化并排序盘口档位，最多保留五档真实数据。"""
+        rows = []
+        for level in levels or []:
+            try:
+                price = float(level.get("price", 0.0))
+                size = float(level.get("size", 0.0))
+            except (AttributeError, TypeError, ValueError):
+                continue
+            if price <= 0 or size <= 0:
+                continue
+            rows.append({
+                "price": price,
+                "size": size,
+                "notional": price * size,
+            })
+        rows.sort(key=lambda item: item["price"], reverse=reverse)
+        return rows[:5]
+
+    def _fetch_dashboard_market_data(self, client: httpx.Client, *, include_candles: bool) -> None:
+        """抓取驾驶舱使用的公开行情；失败时保留最后一次成功快照。"""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        updates: Dict[str, Any] = {"updated_at": now_iso, "last_error": ""}
+        errors: List[str] = []
+
+        if include_candles:
+            try:
+                response = client.get(
+                    "https://api.binance.com/api/v3/klines",
+                    params={"symbol": "BTCUSDT", "interval": "1m", "limit": 100},
+                )
+                response.raise_for_status()
+                candles = []
+                for row in response.json():
+                    if not isinstance(row, list) or len(row) < 6:
+                        continue
+                    candles.append({
+                        "time": int(row[0] // 1000),
+                        "open": float(row[1]),
+                        "high": float(row[2]),
+                        "low": float(row[3]),
+                        "close": float(row[4]),
+                        "volume": float(row[5]),
+                    })
+                updates.update({
+                    "candles": candles,
+                    "candles_updated_at": now_iso,
+                })
+            except Exception as exc:
+                errors.append(f"BTC K线: {exc}")
+            try:
+                eth_response = client.get(
+                    "https://api.binance.com/api/v3/ticker/price",
+                    params={"symbol": "ETHUSDT"},
+                )
+                eth_response.raise_for_status()
+                updates["eth_price"] = float(eth_response.json()["price"])
+            except Exception as exc:
+                errors.append(f"ETH行情: {exc}")
+
+        yes_token = str(getattr(self, "_yes_token_id", None) or "")
+        no_token = str(getattr(self, "_no_token_id", None) or "")
+        market_slug = ""
+        if 0 <= self.current_instrument_index < len(self.all_btc_instruments):
+            market_slug = str(
+                self.all_btc_instruments[self.current_instrument_index].get("slug", "")
+            )
+
+        books: Dict[str, Any] = {}
+        for outcome, token_id in (("up", yes_token), ("down", no_token)):
+            if not token_id:
+                continue
+            try:
+                book_response = client.get(
+                    "https://clob.polymarket.com/book",
+                    params={"token_id": token_id},
+                )
+                book_response.raise_for_status()
+                raw_book = book_response.json()
+                books[outcome] = {
+                    "token_id": token_id,
+                    "bids": self._dashboard_book_levels(raw_book.get("bids", []), reverse=True),
+                    "asks": self._dashboard_book_levels(raw_book.get("asks", []), reverse=False),
+                }
+            except Exception as exc:
+                errors.append(f"{outcome.upper()}盘口: {exc}")
+        if books:
+            updates.update({
+                "orderbook": {
+                    "market_slug": market_slug,
+                    "updated_at": now_iso,
+                    **books,
+                },
+                "orderbook_updated_at": now_iso,
+            })
+        updates["last_error"] = "; ".join(errors)
+
+        with self._dashboard_lock:
+            self._dashboard_market_data.update(updates)
+
+    def _dashboard_data_loop(self) -> None:
+        """后台轮询真实 K 线和 Polymarket 盘口。"""
+        proxy_url = (os.getenv("POLYMARKET_PROXY_URL") or "").strip() or None
+        client_kwargs: Dict[str, Any] = {"timeout": 6.0}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        next_candles_at = 0.0
+        with httpx.Client(**client_kwargs) as client:
+            while not self._dashboard_stop_event.is_set():
+                now = time.monotonic()
+                try:
+                    include_candles = now >= next_candles_at
+                    self._fetch_dashboard_market_data(client, include_candles=include_candles)
+                    if include_candles:
+                        next_candles_at = now + 15.0
+                    self._publish_dashboard_state()
+                except Exception as exc:
+                    with self._dashboard_lock:
+                        self._dashboard_market_data["last_error"] = str(exc)
+                    logger.debug(f"驾驶舱行情刷新失败: {exc}")
+                self._dashboard_stop_event.wait(2.0)
+
+    def _publish_dashboard_state(self) -> None:
+        if self.grafana_exporter and hasattr(self.grafana_exporter, "update_live_state"):
+            try:
+                self.grafana_exporter.update_live_state(self.get_dashboard_snapshot())
+            except Exception:
+                pass
+
+    def _set_decision_stage(self, stage: str, title: str, *, status: str = "active") -> None:
+        """发布真实策略阶段，供流程图驱动节点与连线。"""
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._dashboard_lock:
+            stages = [dict(item) for item in self._decision_state.get("stages", [])]
+            for item in stages:
+                if item.get("status") == "active":
+                    item["status"] = "completed"
+            stages.append({
+                "stage": stage,
+                "title": title,
+                "status": status,
+                "timestamp": now_iso,
+            })
+            self._decision_state.update({
+                "status": "running",
+                "current_stage": stage,
+                "updated_at": now_iso,
+                "stages": stages[-20:],
+            })
+        if self.grafana_exporter and hasattr(self.grafana_exporter, "record_dashboard_event"):
+            self.grafana_exporter.record_dashboard_event(
+                "decision_stage",
+                title,
+                cycle_id=self._current_cycle_id,
+                stage=stage,
+                status=status,
+                is_simulation=self.current_simulation_mode,
+            )
+        self._publish_dashboard_state()
+
     def on_start(self) -> None:
         self._stopping = False
         logger.info("=" * 80)
@@ -524,8 +714,19 @@ class IntegratedBTCStrategy(Strategy):
         self.run_in_executor(self._start_timer_loop)
 
         if self.grafana_exporter:
-            import threading
-            threading.Thread(target=self._start_grafana_sync, daemon=True).start()
+            self._grafana_thread = threading.Thread(
+                target=self._start_grafana_sync,
+                daemon=True,
+                name="grafana-exporter-loop",
+            )
+            self._grafana_thread.start()
+            self._dashboard_stop_event.clear()
+            self._dashboard_thread = threading.Thread(
+                target=self._dashboard_data_loop,
+                daemon=True,
+                name="dashboard-market-data",
+            )
+            self._dashboard_thread.start()
 
         self.liquidation_processor.start_stream()
         self.cvd_ob_processor.start_stream()
@@ -983,6 +1184,7 @@ class IntegratedBTCStrategy(Strategy):
         self._yes_instrument_id = market.get("yes_instrument_id") or market["instrument"].id
         self._no_instrument_id = market.get("no_instrument_id")
         self._yes_token_id = market.get("yes_token_id") or market.get("token_id")
+        self._no_token_id = market.get("no_token_id")
 
         if waiting:
             self.next_switch_time = market["start_time"]
@@ -1133,9 +1335,22 @@ class IntegratedBTCStrategy(Strategy):
         """Return live state for the terminal UI dashboard."""
         now = datetime.now(timezone.utc)
         now_ts = now.timestamp()
+        with self._dashboard_lock:
+            market_data = {
+                **self._dashboard_market_data,
+                "candles": list(self._dashboard_market_data.get("candles", [])),
+                "orderbook": dict(self._dashboard_market_data.get("orderbook", {})),
+            }
+            decision_state = {
+                **self._decision_state,
+                "stages": [dict(item) for item in self._decision_state.get("stages", [])],
+            }
 
         market_slug = "—"
         next_window = "—"
+        market_start_iso = None
+        market_end_iso = None
+        market_label = "BTC 15M"
         trade_window_open = False
         waiting_for_market = self._waiting_for_market_open
         price_to_beat: Optional[float] = None
@@ -1145,6 +1360,9 @@ class IntegratedBTCStrategy(Strategy):
             market_slug = market.get("slug", "—")
             market_start_ts = int(market["market_timestamp"])
             market_end_ts = int(market["end_timestamp"])
+            market_start_iso = datetime.fromtimestamp(market_start_ts, tz=timezone.utc).isoformat()
+            market_end_iso = datetime.fromtimestamp(market_end_ts, tz=timezone.utc).isoformat()
+            market_label = "BTC 15M"
             elapsed = now_ts - market_start_ts
 
             if self.test_mode:
@@ -1170,18 +1388,73 @@ class IntegratedBTCStrategy(Strategy):
                     price_to_beat = float(trade.btc_spot_price)
                     break
             if price_to_beat is None:
-                price_to_beat = self.settlement_tracker.get_current_btc_price()
+                candles = market_data.get("candles", [])
+                if candles:
+                    nearest = min(
+                        candles,
+                        key=lambda bar: abs(float(bar.get("time", 0)) - market_start_ts),
+                    )
+                    price_to_beat = float(nearest.get("open", 0.0) or 0.0) or None
 
-        btc_price = self.settlement_tracker.get_current_btc_price()
+        candles = market_data.get("candles", [])
+        btc_price = (
+            float(candles[-1].get("close", 0.0) or 0.0)
+            if candles
+            else None
+        )
+
         up_price = down_price = None
+        yes_bid = yes_ask = None
         if self._last_bid_ask:
             bid, ask = self._last_bid_ask
-            mid = (float(bid) + float(ask)) / 2
-            up_price = mid
-            down_price = max(0.0, min(1.0, 1.0 - mid))
+            yes_bid = float(bid)
+            yes_ask = float(ask)
+
+        orderbook = market_data.get("orderbook", {})
+        up_book = orderbook.get("up", {}) if isinstance(orderbook, dict) else {}
+        down_book = orderbook.get("down", {}) if isinstance(orderbook, dict) else {}
+        up_asks = up_book.get("asks", []) if isinstance(up_book, dict) else []
+        down_asks = down_book.get("asks", []) if isinstance(down_book, dict) else []
+        if up_asks:
+            up_price = float(up_asks[0].get("price", 0.0) or 0.0) or None
+        if down_asks:
+            down_price = float(down_asks[0].get("price", 0.0) or 0.0) or None
 
         open_count = len(self._open_positions)
         pending_count = len(self._pending_orders)
+        positions = []
+        for entry_id, pos in self._open_positions.items():
+            try:
+                entry_price_f = float(pos.get("entry_price", 0.0) or 0.0)
+            except Exception:
+                entry_price_f = 0.0
+            try:
+                qty_f = float(pos.get("filled_qty", 0.0) or 0.0)
+            except Exception:
+                qty_f = 0.0
+            try:
+                size_usd_f = float(pos.get("size_usd", 0.0) or 0.0)
+            except Exception:
+                size_usd_f = 0.0
+            try:
+                last_bid_f = float(pos.get("last_bid", 0.0) or 0.0)
+            except Exception:
+                last_bid_f = 0.0
+            unrealized = qty_f * (last_bid_f - entry_price_f) if last_bid_f > 0 else 0.0
+            positions.append({
+                "id": str(entry_id),
+                "market_slug": str(pos.get("market_slug", market_slug) or market_slug),
+                "direction": str(pos.get("direction", "")).upper(),
+                "label": str(pos.get("label", "")),
+                "size_usd": size_usd_f,
+                "entry_price": entry_price_f,
+                "qty_tokens": qty_f,
+                "last_bid": last_bid_f,
+                "unrealized_pnl": unrealized,
+                "signal_score": float(pos.get("signal_score", 0.0) or 0.0),
+                "signal_confidence": float(pos.get("signal_confidence", 0.0) or 0.0),
+                "exit_in_flight": bool(pos.get("exit_in_flight", False)),
+            })
         if open_count:
             pos = self._open_positions[next(iter(self._open_positions))]
             direction = pos.get("direction", "?").upper()
@@ -1209,11 +1482,26 @@ class IntegratedBTCStrategy(Strategy):
 
         return {
             "market_slug": market_slug,
+            "market_label": market_label,
+            "market_start": market_start_iso,
+            "market_end": market_end_iso,
+            "mode": "simulation" if self.current_simulation_mode else "live",
+            "quote_updated_at": self._quote_updated_at,
             "btc_price": btc_price,
+            "eth_price": market_data.get("eth_price"),
             "price_to_beat": price_to_beat,
             "up_price": up_price,
             "down_price": down_price,
+            "yes_bid": yes_bid,
+            "yes_ask": yes_ask,
+            "candles": market_data.get("candles", []),
+            "candles_updated_at": market_data.get("candles_updated_at"),
+            "orderbook": orderbook,
+            "orderbook_updated_at": market_data.get("orderbook_updated_at"),
+            "market_data_error": market_data.get("last_error", ""),
+            "decision": decision_state,
             "position_summary": position_summary,
+            "positions": positions,
             "signal": signal,
             "confidence": confidence,
             "next_window": next_window,
@@ -1296,6 +1584,16 @@ class IntegratedBTCStrategy(Strategy):
         self._decision_cycle_counter += 1
         self._current_cycle_id = self._decision_cycle_counter
         self._current_cycle_outcome = "running"
+        with self._dashboard_lock:
+            self._decision_state = {
+                "cycle_id": self._current_cycle_id,
+                "status": "running",
+                "current_stage": "DECISION START",
+                "outcome": "",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "stages": [],
+            }
+        self._set_decision_stage("DECISION START", "启动决策周期")
         mode = "SIM" if is_simulation else "LIVE"
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         sep = "═" * self._STEP_BOX_WIDTH
@@ -1332,6 +1630,29 @@ class IntegratedBTCStrategy(Strategy):
     def _finish_decision_cycle(self, is_simulation: bool, outcome: str) -> None:
         """Record outcome and close the grouped decision-cycle log block."""
         self._set_cycle_outcome(outcome)
+        failed = any(token in outcome.upper() for token in ("SKIP", "BLOCK", "REJECT", "FAIL"))
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with self._dashboard_lock:
+            stages = [dict(item) for item in self._decision_state.get("stages", [])]
+            for item in stages:
+                if item.get("status") == "active":
+                    item["status"] = "blocked" if failed else "completed"
+            self._decision_state.update({
+                "status": "blocked" if failed else "completed",
+                "current_stage": None,
+                "outcome": outcome,
+                "updated_at": now_iso,
+                "stages": stages,
+            })
+        if self.grafana_exporter and hasattr(self.grafana_exporter, "record_dashboard_event"):
+            self.grafana_exporter.record_dashboard_event(
+                "decision_finished",
+                outcome,
+                cycle_id=self._current_cycle_id,
+                status="blocked" if failed else "completed",
+                is_simulation=is_simulation,
+            )
+        self._publish_dashboard_state()
         self._end_decision_cycle(is_simulation)
 
     def _publish_order_metrics(
@@ -1389,6 +1710,18 @@ class IntegratedBTCStrategy(Strategy):
                 market_slug=market_slug,
                 is_simulation=is_simulation,
             )
+            if hasattr(self.grafana_exporter, "record_dashboard_event"):
+                self.grafana_exporter.record_dashboard_event(
+                    "order_submitted",
+                    "上涨订单已提交" if direction.lower() == "long" else "下跌订单已提交",
+                    market_slug=market_slug,
+                    side="BUY",
+                    qty_tokens=qty,
+                    size_usd=float(size_usd),
+                    entry_price=held,
+                    poly_price=float(poly_price),
+                    is_simulation=is_simulation,
+                )
         except Exception:
             pass
 
@@ -1452,6 +1785,7 @@ class IntegratedBTCStrategy(Strategy):
             │    SpikeDetection       BULLISH  conf=82%  score=74.0
             └────────────────────────────────────────────────────────────── ...
         """
+        self._set_decision_stage(step, title)
         mode_tag = "SIM" if is_simulation else "LIVE"
         cycle_part = (
             f"CYCLE #{self._current_cycle_id} │ "
@@ -1608,6 +1942,7 @@ class IntegratedBTCStrategy(Strategy):
                 ask_decimal = ask.as_decimal()
             except Exception:
                 return
+            self._quote_updated_at = datetime.now(timezone.utc).isoformat()
 
             # Live / paper exit check on every tick for held tokens.
             try:
@@ -1630,6 +1965,7 @@ class IntegratedBTCStrategy(Strategy):
             # Everything below is signal/decision logic for the active market
             # only. Position exits already ran above for any held instrument.
             if self.instrument_id is None or tick.instrument_id != self.instrument_id:
+                self._publish_dashboard_state()
                 return
 
             now = datetime.now(timezone.utc)
@@ -1640,6 +1976,7 @@ class IntegratedBTCStrategy(Strategy):
                 self.price_history.pop(0)
 
             self._last_bid_ask = (bid_decimal, ask_decimal)
+            self._publish_dashboard_state()
             self._tick_buffer.append({"ts": now, "price": mid_price})
             self._tick_count_since_last_heartbeat += 1
 
@@ -1746,6 +2083,8 @@ class IntegratedBTCStrategy(Strategy):
 
     def _make_trading_decision_sync(self, current_price: float) -> None:
         """Synchronous wrapper — called from executor thread."""
+        if self._stopping:
+            return
         price_decimal = Decimal(str(current_price))
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -1885,7 +2224,11 @@ class IntegratedBTCStrategy(Strategy):
         Step 5  Register with settlement tracker
         Step 6  Weekly retrain triggered by settlement tracker
         """
+        if self._stopping:
+            return
         is_simulation = await self.check_simulation_mode()
+        if self._stopping:
+            return
 
         if len(self.price_history) < 20:
             logger.warning(f"Not enough price history ({len(self.price_history)}/20)")
@@ -2482,6 +2825,10 @@ class IntegratedBTCStrategy(Strategy):
 
         signal_for_logging = fused if fused is not None else _make_stub_signal(direction, ml_p_up)
 
+        if self._stopping:
+            self._finish_decision_cycle(is_simulation, "STOPPED — shutdown requested")
+            return
+
         # Record direction lock + last-entry held price + count BEFORE
         # the actual order goes out, so any concurrent tick that fires
         # during submission cannot bypass these gates.
@@ -2664,6 +3011,25 @@ class IntegratedBTCStrategy(Strategy):
         }
         self._open_positions[trade_id] = position
 
+        if self.grafana_exporter:
+            try:
+                self.grafana_exporter.increment_order_counter("filled")
+                self.grafana_exporter.record_dashboard_event(
+                    "paper_fill",
+                    "模拟买入成交",
+                    trade_id=trade_id,
+                    market_slug=slug,
+                    side="BUY",
+                    direction=direction.upper(),
+                    qty_tokens=fill_qty,
+                    fill_price=float(fill_price),
+                    notional_usd=size_usd,
+                    is_simulation=True,
+                )
+            except Exception:
+                pass
+        self._publish_dashboard_state()
+
         if trade_instrument_id != self.instrument_id:
             try:
                 self.subscribe_quote_ticks(trade_instrument_id)
@@ -2789,6 +3155,28 @@ class IntegratedBTCStrategy(Strategy):
                 self.grafana_exporter.record_trade_duration((now - opened_at).total_seconds())
             except Exception:
                 pass
+
+        if self.grafana_exporter:
+            try:
+                self.grafana_exporter.record_dashboard_event(
+                    "paper_exit_filled",
+                    "模拟卖出成交",
+                    trade_id=pt.trade_id,
+                    market_slug=pt.market_slug,
+                    side="SELL",
+                    direction=position.get("direction", ""),
+                    qty_tokens=qty_f,
+                    fill_price=exit_price_f,
+                    entry_price=entry_price_f,
+                    notional_usd=qty_f * exit_price_f,
+                    realized_pnl=realized,
+                    close_reason=close_reason,
+                    outcome=outcome,
+                    is_simulation=True,
+                )
+            except Exception:
+                pass
+        self._publish_dashboard_state()
 
         settled = [t for t in self.paper_trades if t.outcome in ("WIN", "LOSS")]
         wins = sum(1 for t in settled if t.outcome == "WIN")
@@ -3152,6 +3540,17 @@ class IntegratedBTCStrategy(Strategy):
                 logger.debug(f"PerformanceTracker: no order-counter method for '{event_type}'")
         except Exception as e:
             logger.warning(f"Failed to track order event '{event_type}': {e}")
+        try:
+            if self.grafana_exporter:
+                if event_type in ("filled", "rejected"):
+                    self.grafana_exporter.increment_order_counter(event_type)
+                if event_type in ("rejected", "denied") and hasattr(self.grafana_exporter, "record_dashboard_event"):
+                    self.grafana_exporter.record_dashboard_event(
+                        f"order_{event_type}",
+                        f"Order {event_type}",
+                    )
+        except Exception:
+            pass
 
     def on_order_filled(self, event) -> None:
         client_id = str(event.client_order_id)
@@ -3202,6 +3601,19 @@ class IntegratedBTCStrategy(Strategy):
             ],
         )
         self._track_order_event("filled")
+        try:
+            if self.grafana_exporter and hasattr(self.grafana_exporter, "record_dashboard_event"):
+                self.grafana_exporter.record_dashboard_event(
+                    "exit_filled" if is_exit else "order_filled",
+                    "卖出成交" if is_exit else "买入成交",
+                    client_id=client_id,
+                    qty_tokens=float(fill_qty),
+                    fill_price=float(fill_price),
+                    notional_usd=notional,
+                    side="SELL" if is_exit else "BUY",
+                )
+        except Exception:
+            pass
 
         # Branch on whether this fill closed an existing position (SELL) or
         # opened a new one (BUY).
@@ -3469,6 +3881,28 @@ class IntegratedBTCStrategy(Strategy):
                 )
             except Exception:
                 pass
+
+        if self.grafana_exporter:
+            try:
+                self.grafana_exporter.record_dashboard_event(
+                    "position_closed",
+                    "实盘仓位已平仓",
+                    trade_id=entry_id,
+                    market_slug=position.get("market_slug", ""),
+                    side="SELL",
+                    direction=position.get("direction", ""),
+                    qty_tokens=qty_f,
+                    entry_price=entry_price_f,
+                    fill_price=exit_price_f,
+                    notional_usd=qty_f * exit_price_f,
+                    realized_pnl=realized,
+                    close_reason=close_reason,
+                    outcome=outcome,
+                    is_simulation=False,
+                )
+            except Exception:
+                pass
+        self._publish_dashboard_state()
 
         marker = {
             "EXIT_TP": "TAKE-PROFIT",
@@ -3907,9 +4341,12 @@ class IntegratedBTCStrategy(Strategy):
             loop.run_until_complete(self.grafana_exporter._update_loop())
         except Exception as e:
             logger.error(f"Failed to start Grafana: {e}")
+        finally:
+            loop.close()
 
     def on_stop(self) -> None:
         self._stopping = True
+        self._dashboard_stop_event.set()
         logger.info("Integrated BTC strategy stopped")
 
         for name, stop_fn in (
@@ -3950,8 +4387,17 @@ class IntegratedBTCStrategy(Strategy):
             )
             self._save_live_trades()
         if self.grafana_exporter:
-            loop = asyncio.new_event_loop()
             try:
-                loop.run_until_complete(self.grafana_exporter.stop())
+                self.grafana_exporter.stop_sync()
             except Exception:
                 pass
+
+        for name, thread, timeout in (
+            ("驾驶舱行情线程", self._dashboard_thread, 7.0),
+            ("指标更新线程", self._grafana_thread, 3.0),
+        ):
+            if thread is None or not thread.is_alive() or threading.current_thread() is thread:
+                continue
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                logger.warning(f"{name} 未在超时前退出")

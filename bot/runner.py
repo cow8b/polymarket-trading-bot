@@ -17,6 +17,8 @@ load_dotenv()
 from loguru import logger
 import redis
 
+from bot.shutdown import install_shutdown_signal_handlers, shutdown_node
+
 # Apply patches BEFORE importing Nautilus
 from patches.gamma_markets import apply_gamma_markets_patch, verify_patch
 
@@ -212,6 +214,7 @@ def _boot_bot_node(
     node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
     node.trader.add_strategy(strategy)
     node.build()
+    install_shutdown_signal_handlers()
     logger.info("Nautilus node built successfully")
 
     return node, strategy, redis_client is not None
@@ -237,6 +240,7 @@ def run_integrated_bot(
     enable_tui:
         Show the live Rich terminal dashboard instead of scrolling stderr logs.
     """
+    install_shutdown_signal_handlers()
     if not enable_tui:
         print("=" * 80)
         print("INTEGRATED POLYMARKET BTC 15-MIN TRADING BOT")
@@ -386,6 +390,8 @@ def run_integrated_bot(
     node.add_exec_client_factory(POLYMARKET, PolymarketLiveExecClientFactory)
     node.trader.add_strategy(strategy)
     node.build()
+    # Nautilus 构建过程会注册自己的信号处理器，这里重新安装应用级处理器。
+    install_shutdown_signal_handlers()
     logger.info("Nautilus node built successfully")
 
     if enable_tui:
@@ -412,11 +418,12 @@ def run_integrated_bot(
     print("=" * 80)
 
     try:
+        install_shutdown_signal_handlers()
         node.run()
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
-        node.dispose()
+        shutdown_node(node, timeout=10.0)
         logger.info("Bot stopped")
 
 

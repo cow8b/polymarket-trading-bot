@@ -62,13 +62,16 @@ METRICS_UPDATE_INTERVAL  Seconds between portfolio gauge refreshes (default 1, r
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import threading
 import urllib.parse
-from datetime import datetime
+from collections import deque
+from datetime import datetime, timezone
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 # ── Windows guard for prometheus_client ──────────────────────────────────────
@@ -116,6 +119,15 @@ PROCESSOR_NAMES = [
 ]
 
 
+def _dashboard_html() -> str:
+    """Return the built-in dashboard HTML, falling back to the embedded page."""
+    path = Path(__file__).with_name("dashboard.html")
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return DASHBOARD_HTML
+
+
 class MetricsHandler(BaseHTTPRequestHandler):
     """HTTP handler for Prometheus metrics and Grafana API probes."""
 
@@ -130,11 +142,40 @@ class MetricsHandler(BaseHTTPRequestHandler):
             <style>body{font-family:sans-serif;margin:2em;background:#111;color:#eee;}
             a{color:#58a6ff;}h1{color:#f0b429;}</style></head><body>
             <h1>&#128200; Polymarket AI Trading Bot</h1>
+            <p><a href="/dashboard">/dashboard</a> &mdash; Built-in live dashboard</p>
             <p><a href="/metrics">/metrics</a> &mdash; Prometheus scrape target</p>
+            <p><a href="/api/dashboard/snapshot">/api/dashboard/snapshot</a> &mdash; Dashboard JSON snapshot</p>
             <p><a href="/health">/health</a> &mdash; JSON liveness probe</p>
             </body></html>""")
+        elif parsed.path == "/dashboard":
+            self._respond(200, "text/html; charset=utf-8", _dashboard_html().encode("utf-8"))
         elif parsed.path == "/health":
             self._respond(200, "application/json", b'{"status":"healthy"}')
+        elif parsed.path == "/api/dashboard/snapshot":
+            if not self.exporter:
+                self._respond(503, "application/json", b'{"error":"exporter unavailable"}', cors=True)
+                return
+            body = json.dumps(
+                self.exporter.dashboard_snapshot(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self._respond(200, "application/json", body, cors=True)
+        elif parsed.path == "/api/dashboard/history":
+            if not self.exporter:
+                self._respond(503, "application/json", b'{"error":"exporter unavailable"}', cors=True)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                limit = int(query.get("limit", ["600"])[0])
+            except (TypeError, ValueError):
+                limit = 600
+            body = json.dumps(
+                self.exporter.dashboard_history(limit=limit),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self._respond(200, "application/json", body, cors=True)
         elif parsed.path == "/metrics":
             try:
                 data = generate_latest(REGISTRY)
@@ -180,6 +221,7 @@ class MetricsHandler(BaseHTTPRequestHandler):
     ) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
         if cors:
             self.send_header("Access-Control-Allow-Origin", "*")
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -216,6 +258,13 @@ class GrafanaMetricsExporter:
         self.execution = get_execution_engine()
 
         self._setup_metrics()
+        self._history_lock = threading.Lock()
+        self._history = deque(maxlen=_dashboard_history_points())
+        self._live_state_lock = threading.Lock()
+        self._live_state: Dict[str, Any] = {}
+        self._events_lock = threading.Lock()
+        self._dashboard_events = deque(maxlen=200)
+        self._dashboard_event_sequence = 0
         self._is_running = False
         self._server: Optional[HTTPServer] = None
         self._thread: Optional[threading.Thread] = None
@@ -504,6 +553,7 @@ class GrafanaMetricsExporter:
                 )
 
             logger.debug("Portfolio metrics updated")
+            self._record_dashboard_history()
         except Exception as e:
             logger.error(f"Error updating portfolio metrics: {e}")
 
@@ -533,6 +583,7 @@ class GrafanaMetricsExporter:
 
             if metadata:
                 self._apply_processor_metadata(name, metadata)
+            self._record_dashboard_history()
         except Exception as e:
             logger.debug(f"update_signal_processor({name}) error: {e}")
 
@@ -605,6 +656,7 @@ class GrafanaMetricsExporter:
             self.fusion_score.set(score)
             self.fusion_confidence.set(confidence)
             self.fusion_num_signals.set(num_signals)
+            self._record_dashboard_history()
         except Exception as e:
             logger.debug(f"update_fusion_metrics error: {e}")
 
@@ -613,6 +665,7 @@ class GrafanaMetricsExporter:
         try:
             self.ml_edge_score.set(edge)
             self.ml_prediction.set(prediction)
+            self._record_dashboard_history()
         except Exception as e:
             logger.debug(f"update_ml_metrics error: {e}")
 
@@ -637,6 +690,235 @@ class GrafanaMetricsExporter:
             self.orders_filled.inc()
         elif status == "rejected":
             self.orders_rejected.inc()
+
+    def update_live_state(self, state: Dict[str, Any]) -> None:
+        """Publish non-Prometheus live strategy state for the built-in dashboard."""
+        try:
+            with self._live_state_lock:
+                self._live_state = dict(state or {})
+            self._record_dashboard_history()
+        except Exception as e:
+            logger.debug(f"update_live_state error: {e}")
+
+    def record_dashboard_event(self, event_type: str, message: str, **payload: Any) -> None:
+        """Append a real strategy/order event for the built-in dashboard log."""
+        try:
+            with self._events_lock:
+                self._dashboard_event_sequence += 1
+                event = {
+                    "sequence": self._dashboard_event_sequence,
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "type": event_type,
+                    "message": message,
+                    "payload": payload,
+                }
+                self._dashboard_events.append(event)
+        except Exception as e:
+            logger.debug(f"record_dashboard_event error: {e}")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Built-in dashboard JSON API
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def dashboard_snapshot(self) -> Dict[str, Any]:
+        """Return a browser-friendly snapshot using the same metrics as Grafana."""
+        metrics = self._collect_metric_samples()
+        return self._snapshot_from_metrics(metrics)
+
+    def dashboard_history(self, limit: int = 600) -> Dict[str, Any]:
+        """Return recent in-memory dashboard samples for browser time-series charts."""
+        limit = max(1, min(limit, self._history.maxlen or 600))
+        with self._history_lock:
+            points = list(self._history)[-limit:]
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "points": points,
+        }
+
+    def _record_dashboard_history(self) -> None:
+        """Append one compact dashboard sample for the built-in front-end."""
+        try:
+            snapshot = self.dashboard_snapshot()
+            with self._live_state_lock:
+                live_state = dict(self._live_state)
+            compact_live_state = {
+                key: live_state.get(key)
+                for key in (
+                    "btc_price",
+                    "eth_price",
+                    "up_price",
+                    "down_price",
+                    "market_slug",
+                    "market_start",
+                    "market_end",
+                    "quote_updated_at",
+                    "orderbook_updated_at",
+                    "mode",
+                )
+            }
+            point = {
+                "ts": snapshot["timestamp"],
+                "portfolio": snapshot["portfolio"],
+                "risk": snapshot["risk"],
+                "trade_stats": snapshot["trade_stats"],
+                "fusion_ml": snapshot["fusion_ml"],
+                "execution": snapshot["execution"],
+                "latest_order": snapshot["latest_order"],
+                "live_state": compact_live_state,
+                "processor_indicators": snapshot["processor_indicators"],
+                "processor_scores": {
+                    name: data.get("score", 0.0)
+                    for name, data in snapshot["processors"].items()
+                },
+                "processor_directions": {
+                    name: data.get("direction", 0.0)
+                    for name, data in snapshot["processors"].items()
+                },
+            }
+            with self._history_lock:
+                self._history.append(point)
+        except Exception as e:
+            logger.debug(f"Dashboard history update failed: {e}")
+
+    def _collect_metric_samples(self) -> Dict[str, Any]:
+        """Collect Prometheus samples into a simple metric-name map."""
+        metrics: Dict[str, Any] = {}
+        for family in REGISTRY.collect():
+            for sample in family.samples:
+                name = sample.name
+                labels = dict(sample.labels or {})
+                value = float(sample.value)
+                if labels:
+                    metrics.setdefault(name, []).append({
+                        "labels": labels,
+                        "value": value,
+                    })
+                else:
+                    metrics[name] = value
+        return metrics
+
+    def _snapshot_from_metrics(self, m: Dict[str, Any]) -> Dict[str, Any]:
+        def v(name: str, default: float = 0.0) -> float:
+            raw = m.get(name, default)
+            if isinstance(raw, list):
+                return default
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return default
+
+        def labeled(name: str, label: str, label_value: str, default: float = 0.0) -> float:
+            for item in m.get(name, []) if isinstance(m.get(name), list) else []:
+                if item.get("labels", {}).get(label) == label_value:
+                    return float(item.get("value", default))
+            return default
+
+        processors = {}
+        for name in PROCESSOR_NAMES:
+            processors[name] = {
+                "score": labeled("signal_processor_score", "processor", name),
+                "confidence": labeled("signal_processor_confidence", "processor", name),
+                "direction": labeled("signal_processor_direction", "processor", name),
+                "fires_total": labeled("signal_processor_fires_total", "processor", name),
+            }
+
+        orders_by_direction: Dict[str, float] = {}
+        for item in m.get("trading_orders_submitted_total", []) if isinstance(m.get("trading_orders_submitted_total"), list) else []:
+            direction = item.get("labels", {}).get("direction", "unknown")
+            orders_by_direction[direction] = orders_by_direction.get(direction, 0.0) + float(item.get("value", 0.0))
+
+        with self._live_state_lock:
+            live_state = dict(self._live_state)
+        with self._events_lock:
+            dashboard_events = list(self._dashboard_events)
+
+        return {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "live_state": live_state,
+            "dashboard_events": dashboard_events,
+            "portfolio": {
+                "current_capital": v("trading_current_capital"),
+                "total_pnl": v("trading_total_pnl"),
+                "unrealized_pnl": v("trading_unrealized_pnl"),
+                "roi": v("trading_roi"),
+                "daily_roi": v("trading_daily_roi"),
+                "weekly_roi": v("trading_weekly_roi"),
+                "monthly_roi": v("trading_monthly_roi"),
+            },
+            "risk": {
+                "sharpe_ratio": v("trading_sharpe_ratio"),
+                "sortino_ratio": v("trading_sortino_ratio"),
+                "calmar_ratio": v("trading_calmar_ratio"),
+                "kelly_fraction": v("trading_kelly_fraction"),
+                "max_drawdown": v("trading_max_drawdown"),
+                "max_drawdown_usd": v("trading_max_drawdown_usd"),
+                "peak_capital": v("trading_peak_capital"),
+                "recovery_factor": v("trading_recovery_factor"),
+                "risk_utilization": v("trading_risk_utilization"),
+            },
+            "trade_stats": {
+                "win_rate": v("trading_win_rate"),
+                "profit_factor": v("trading_profit_factor"),
+                "expectancy_usd": v("trading_expectancy_usd"),
+                "avg_win_usd": v("trading_avg_win_usd"),
+                "avg_loss_usd": v("trading_avg_loss_usd"),
+                "avg_win_loss_ratio": v("trading_avg_win_usd") / max(v("trading_avg_loss_usd"), 0.0001),
+                "consecutive_wins": v("trading_consecutive_wins"),
+                "consecutive_losses": v("trading_consecutive_losses"),
+                "avg_hold_seconds": v("trading_avg_hold_seconds"),
+                "avg_trades_per_day": v("trading_avg_trades_per_day"),
+            },
+            "processors": processors,
+            "processor_indicators": {
+                "ohlcv_rsi": v("signal_ohlcv_rsi"),
+                "ohlcv_macd_histogram": v("signal_ohlcv_macd_histogram"),
+                "cvd_delta": v("signal_cvd_delta"),
+                "tick_velocity_30s": v("signal_tick_velocity_30s"),
+                "tick_velocity_60s": v("signal_tick_velocity_60s"),
+                "orderbook_bid_ask_ratio": v("signal_orderbook_bid_ask_ratio"),
+                "liquidation_cascade_volume": v("signal_liquidation_cascade_volume"),
+                "spike_magnitude": v("signal_spike_magnitude"),
+                "divergence_score": v("signal_divergence_score"),
+                "funding_rate": v("signal_funding_rate"),
+                "oi_change_pct": v("signal_oi_change_pct"),
+                "pcr_value": v("signal_pcr_value"),
+                "fear_greed_index": v("signal_fear_greed_index"),
+            },
+            "fusion_ml": {
+                "fusion_score": v("trading_fusion_score"),
+                "fusion_confidence": v("trading_fusion_confidence"),
+                "fusion_num_signals": v("trading_fusion_num_signals"),
+                "ml_edge_score": v("trading_ml_edge_score"),
+                "ml_prediction": v("trading_ml_prediction"),
+            },
+            "execution": {
+                "trades_closed_total": v("trading_trades_closed_total"),
+                "winning_trades_total": v("trading_winning_trades_total"),
+                "losing_trades_total": v("trading_losing_trades_total"),
+                "open_positions": v("trading_open_positions"),
+                "total_exposure": v("trading_total_exposure"),
+                "orders_placed_total": v("trading_orders_placed_total"),
+                "orders_filled_total": v("trading_orders_filled_total"),
+                "orders_rejected_total": v("trading_orders_rejected_total"),
+                "orders_by_direction": orders_by_direction,
+            },
+            "latest_order": {
+                "direction": v("trading_last_order_direction"),
+                "size_usd": v("trading_last_order_size_usd"),
+                "entry_price": v("trading_last_order_entry_price"),
+                "poly_yes_price": v("trading_last_order_poly_yes_price"),
+                "qty_tokens": v("trading_last_order_qty_tokens"),
+                "seconds_to_settle": v("trading_last_order_seconds_to_settle"),
+                "btc_spot_usd": v("trading_last_order_btc_spot_usd"),
+                "ml_edge": v("trading_last_order_ml_edge"),
+                "signal_score": v("trading_last_order_signal_score"),
+                "signal_confidence": v("trading_last_order_signal_confidence"),
+                "bid_price": v("trading_last_order_bid_price"),
+                "ask_price": v("trading_last_order_ask_price"),
+                "spread_pct": v("trading_last_order_spread_pct"),
+                "is_simulation": v("trading_last_order_is_simulation"),
+            },
+        }
 
     # ──────────────────────────────────────────────────────────────────────────
     # Server lifecycle
@@ -670,12 +952,265 @@ class GrafanaMetricsExporter:
                 logger.error(f"Metrics update loop error: {e}")
                 await asyncio.sleep(self.update_interval)
 
-    async def stop(self) -> None:
+    def stop_sync(self) -> None:
+        """同步停止 HTTP 服务，允许从已有事件循环的策略回调中调用。"""
         self._is_running = False
         if self._server:
             self._server.shutdown()
             self._server.server_close()
+        if (
+            self._thread is not None
+            and self._thread.is_alive()
+            and threading.current_thread() is not self._thread
+        ):
+            self._thread.join(timeout=2.0)
         logger.info("Metrics exporter stopped")
+
+    async def stop(self) -> None:
+        """异步兼容入口；实际停机过程不需要 await。"""
+        self.stop_sync()
+
+
+def _dashboard_history_points(default: int = 3600) -> int:
+    """Read DASHBOARD_HISTORY_POINTS from env; clamp to a practical memory bound."""
+    raw = os.getenv("DASHBOARD_HISTORY_POINTS", str(default))
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(f"Invalid DASHBOARD_HISTORY_POINTS={raw!r}; using {default}")
+        return default
+    return max(60, min(86400, value))
+
+
+DASHBOARD_HTML = r"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Polymarket AI Bot — Full Analytics</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #111827;
+      --panel-2: #0f172a;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --line: #243044;
+      --good: #22c55e;
+      --bad: #ef4444;
+      --warn: #f59e0b;
+      --blue: #38bdf8;
+      --violet: #a78bfa;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(circle at top left, #14213f 0, var(--bg) 34rem);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--line);
+      background: rgba(11, 16, 32, 0.88);
+      backdrop-filter: blur(12px);
+      padding: 18px 24px;
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+    }
+    h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    main { padding: 22px; max-width: 1780px; margin: 0 auto; }
+    section { margin-bottom: 28px; }
+    h2 { font-size: 16px; font-weight: 700; margin: 0 0 12px; color: #f8fafc; }
+    .grid { display: grid; grid-template-columns: repeat(6, minmax(160px, 1fr)); gap: 12px; }
+    .grid.four { grid-template-columns: repeat(4, minmax(180px, 1fr)); }
+    .grid.five { grid-template-columns: repeat(5, minmax(160px, 1fr)); }
+    .grid.two { grid-template-columns: repeat(2, minmax(280px, 1fr)); }
+    .card {
+      background: linear-gradient(180deg, rgba(17,24,39,.96), rgba(15,23,42,.96));
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      min-height: 92px;
+      box-shadow: 0 10px 32px rgba(0,0,0,.18);
+    }
+    .label { color: var(--muted); font-size: 12px; line-height: 1.25; }
+    .value { font-size: 25px; font-weight: 750; margin-top: 8px; white-space: nowrap; }
+    .unit { color: var(--muted); font-size: 13px; margin-left: 3px; }
+    .gauge .track { height: 8px; background: #1f2937; border-radius: 999px; overflow: hidden; margin-top: 12px; }
+    .gauge .bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--blue), var(--good)); border-radius: 999px; transition: width .25s; }
+    canvas { width: 100%; height: 230px; display: block; }
+    .chart { min-height: 300px; }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px;
+      color: var(--muted); font-size: 12px; background: rgba(15,23,42,.8);
+    }
+    .ok { color: var(--good); }
+    .bad { color: var(--bad); }
+    .warn { color: var(--warn); }
+    .processor { min-height: 120px; }
+    .dir { margin-top: 8px; font-size: 12px; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    td { padding: 8px 0; border-bottom: 1px solid rgba(148,163,184,.12); }
+    td:last-child { text-align: right; color: #f8fafc; font-weight: 650; }
+    @media (max-width: 1180px) {
+      .grid, .grid.four, .grid.five { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
+      .grid.two { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      main { padding: 14px; }
+      .grid, .grid.four, .grid.five { grid-template-columns: 1fr; }
+      header { display: block; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Polymarket AI Bot — Full Analytics</h1>
+      <div class="sub">内置仪表盘 · 数据源与 Grafana 相同，来自 /metrics 同一套指标</div>
+    </div>
+    <div class="pill">状态：<span id="status" class="warn">连接中</span> · 更新时间：<span id="updated">—</span></div>
+  </header>
+  <main id="app"></main>
+  <script>
+    const PROCESSORS = ["OHLCVMomentum","TickVelocity","CVDOrderBook","OrderBookImbalance","Liquidations","SpikeDetection","PriceDivergence","FundingRateOI","DeribitPCR","SentimentAnalysis"];
+    const app = document.getElementById("app");
+    const fmt = {
+      usd: v => "$" + n(v, 2),
+      pct: v => n(v, 2) + "%",
+      num: (v, d=2) => n(v, d),
+      int: v => n(v, 0),
+      prob: v => n((v || 0) * 100, 1) + "%",
+      sec: v => {
+        v = Math.max(0, Number(v || 0));
+        if (v < 60) return n(v, 0) + "s";
+        if (v < 3600) return n(v / 60, 1) + "m";
+        return n(v / 3600, 2) + "h";
+      },
+    };
+    function n(v, d=2) {
+      v = Number(v || 0);
+      return v.toLocaleString(undefined, {maximumFractionDigits:d, minimumFractionDigits:d});
+    }
+    function get(obj, path, fallback=0) {
+      return path.split(".").reduce((o, k) => (o && o[k] !== undefined ? o[k] : undefined), obj) ?? fallback;
+    }
+    function card(label, value, unit="", cls="") {
+      return `<div class="card ${cls}"><div class="label">${label}</div><div class="value">${value}<span class="unit">${unit}</span></div></div>`;
+    }
+    function gauge(label, value, max=100, formatter=fmt.num) {
+      const pct = Math.max(0, Math.min(100, (Number(value || 0) / max) * 100));
+      return `<div class="card gauge"><div class="label">${label}</div><div class="value">${formatter(value)}</div><div class="track"><div class="bar" style="width:${pct}%"></div></div></div>`;
+    }
+    function section(title, html) {
+      return `<section><h2>${title}</h2>${html}</section>`;
+    }
+    function directionText(v) {
+      v = Number(v || 0);
+      if (v > 0) return `<span class="ok">Bullish / UP</span>`;
+      if (v < 0) return `<span class="bad">Bearish / DOWN</span>`;
+      return `<span class="warn">Neutral</span>`;
+    }
+    function render(s) {
+      const p = s.portfolio, r = s.risk, t = s.trade_stats, f = s.fusion_ml, e = s.execution, o = s.latest_order, ind = s.processor_indicators;
+      const procCards = PROCESSORS.map(name => {
+        const x = s.processors[name] || {};
+        return `<div class="card processor gauge"><div class="label">${name}</div><div class="value">${fmt.num(x.score)}</div><div class="track"><div class="bar" style="width:${Math.max(0, Math.min(100, x.score || 0))}%"></div></div><div class="dir">方向：${directionText(x.direction)} · 置信度 ${fmt.prob(x.confidence)} · 触发 ${fmt.int(x.fires_total)}</div></div>`;
+      }).join("");
+      app.innerHTML =
+        section("⚡ Portfolio Overview", `<div class="grid">${card("Capital", fmt.usd(p.current_capital))}${card("Total P&L", fmt.usd(p.total_pnl), "", p.total_pnl >= 0 ? "ok" : "bad")}${card("ROI %", fmt.pct(p.roi))}${card("Daily ROI %", fmt.pct(p.daily_roi))}${card("7-day ROI %", fmt.pct(p.weekly_roi))}${card("30-day ROI %", fmt.pct(p.monthly_roi))}</div>`) +
+        section("📐 Risk-Adjusted Metrics", `<div class="grid four">${gauge("Sharpe Ratio", r.sharpe_ratio, 5)}${gauge("Sortino Ratio", r.sortino_ratio, 5)}${gauge("Calmar Ratio", r.calmar_ratio, 5)}${gauge("Kelly Fraction", r.kelly_fraction, 1, fmt.prob)}</div>`) +
+        section("📉 Drawdown & Capital", `<div class="grid four">${gauge("Max Drawdown %", r.max_drawdown, 100, fmt.pct)}${card("Max Drawdown USD", fmt.usd(r.max_drawdown_usd))}${card("Peak Capital", fmt.usd(r.peak_capital))}${card("Recovery Factor", fmt.num(r.recovery_factor))}</div>`) +
+        section("🎲 Trade Statistics", `<div class="grid five">${gauge("Win Rate %", t.win_rate, 100, fmt.pct)}${card("Profit Factor", fmt.num(t.profit_factor))}${card("Expectancy / Trade", fmt.usd(t.expectancy_usd))}${card("Avg Win / Avg Loss", fmt.num(t.avg_win_loss_ratio))}${card("Streaks", `${fmt.int(t.consecutive_wins)}W / ${fmt.int(t.consecutive_losses)}L`)}</div>`) +
+        section("🤖 Signal Processors — Live Scores", `<div class="grid five">${procCards}</div>`) +
+        section("📊 Signal Processor — Direction & Confidence", `<div class="grid two">${chartCard("processorScores", "All Processor Scores")}${chartCard("processorDirections", "Processor Direction")}</div>`) +
+        section("🔬 Processor-Specific Indicators", `<div class="grid five">${card("OHLCV RSI", fmt.num(ind.ohlcv_rsi))}${card("MACD Histogram", fmt.num(ind.ohlcv_macd_histogram, 4))}${card("CVD Delta", fmt.num(ind.cvd_delta, 0))}${card("Tick Velocity 30s / 60s", `${fmt.num(ind.tick_velocity_30s, 4)} / ${fmt.num(ind.tick_velocity_60s, 4)}`)}${card("Bid/Ask Ratio", fmt.num(ind.orderbook_bid_ask_ratio))}${card("Liquidation Volume", fmt.usd(ind.liquidation_cascade_volume))}${card("Spike Magnitude", fmt.num(ind.spike_magnitude, 4))}${card("Funding / OI", `${fmt.num(ind.funding_rate, 5)} / ${fmt.pct(ind.oi_change_pct)}`)}${card("Deribit PCR", fmt.num(ind.pcr_value))}${card("Fear/Greed", fmt.num(ind.fear_greed_index))}</div>`) +
+        section("🧠 ML Engine & Fusion", `<div class="grid four">${gauge("Fusion Score", f.fusion_score, 100)}${gauge("Fusion Confidence", f.fusion_confidence, 1, fmt.prob)}${gauge("ML Edge Score", f.ml_edge_score, 1, fmt.prob)}${gauge("ML p(UP)", f.ml_prediction, 1, fmt.prob)}</div><div class="grid two" style="margin-top:12px">${chartCard("fusion", "Fusion Score & ML Edge vs time")}${chartCard("signals", "Signals per fusion pass")}</div>`) +
+        section("📦 Execution & Order Flow", `<div class="grid">${card("Trades", fmt.int(e.trades_closed_total))}${card("Wins", fmt.int(e.winning_trades_total))}${card("Losses", fmt.int(e.losing_trades_total))}${card("Open Positions", fmt.int(e.open_positions))}${card("Exposure USD", fmt.usd(e.total_exposure))}${gauge("Risk Utilisation %", r.risk_utilization, 100, fmt.pct)}</div>`) +
+        section("🎯 Latest Order", `<div class="grid five">${card("Direction", directionText(o.direction))}${card("Order size", fmt.usd(o.size_usd))}${card("Entry price", fmt.num(o.entry_price, 4))}${card("Poly YES price", fmt.num(o.poly_yes_price, 4))}${card("Token qty", fmt.num(o.qty_tokens, 4))}${card("Time to settle", fmt.sec(o.seconds_to_settle))}${card("BTC spot @ entry", fmt.usd(o.btc_spot_usd))}${card("ML edge @ entry", fmt.prob(o.ml_edge))}${card("Signal score / conf", `${fmt.num(o.signal_score)} / ${fmt.prob(o.signal_confidence)}`)}${card("Bid / Ask / Spread", `${fmt.num(o.bid_price, 4)} / ${fmt.num(o.ask_price, 4)} / ${fmt.pct(o.spread_pct)}`)}${card("Mode", o.is_simulation ? "SIM" : "LIVE")}</div><div class="grid two" style="margin-top:12px">${chartCard("orders", "Order entry price & size over time")}${tableCard("Order Flow", [["Placed", e.orders_placed_total],["Filled", e.orders_filled_total],["Rejected", e.orders_rejected_total],["UP orders", get(e, "orders_by_direction.up")],["DOWN orders", get(e, "orders_by_direction.down")]])}</div>`) +
+        section("📈 Time Series — Capital, P&L, Drawdown", `<div class="grid two">${chartCard("capital", "Capital & P&L trajectory")}${chartCard("risk", "Sharpe / Sortino / Calmar vs time")}${chartCard("roi", "ROI breakdown")}${chartCard("winDrawdown", "Win rate & max drawdown")}</div>`);
+    }
+    function chartCard(id, title) {
+      return `<div class="card chart"><div class="label">${title}</div><canvas id="${id}"></canvas></div>`;
+    }
+    function tableCard(title, rows) {
+      return `<div class="card"><div class="label">${title}</div><table>${rows.map(r => `<tr><td>${r[0]}</td><td>${fmt.num(r[1], 0)}</td></tr>`).join("")}</table></div>`;
+    }
+    function drawLine(canvas, series, colors) {
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = rect.width * dpr;
+      canvas.height = rect.height * dpr;
+      const ctx = canvas.getContext("2d");
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0,0,rect.width,rect.height);
+      ctx.strokeStyle = "#243044";
+      ctx.lineWidth = 1;
+      for (let i=0;i<4;i++) {
+        const y = 20 + i * ((rect.height-36)/3);
+        ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(rect.width,y); ctx.stroke();
+      }
+      const values = series.flatMap(s => s.values).filter(v => Number.isFinite(v));
+      const min = Math.min(...values, 0), max = Math.max(...values, 1);
+      const span = Math.max(1e-9, max - min);
+      series.forEach((s, idx) => {
+        ctx.strokeStyle = colors[idx % colors.length];
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        s.values.forEach((v, i) => {
+          const x = series[0].values.length <= 1 ? 0 : i * rect.width / (series[0].values.length - 1);
+          const y = rect.height - 16 - ((v - min) / span) * (rect.height - 34);
+          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        ctx.fillStyle = colors[idx % colors.length];
+        ctx.fillText(s.name, 10, 16 + idx * 14);
+      });
+    }
+    function drawCharts(history) {
+      const pts = history.points || [];
+      const arr = fn => pts.map(fn).map(v => Number(v || 0));
+      const colors = ["#38bdf8","#22c55e","#f59e0b","#a78bfa","#ef4444","#14b8a6"];
+      drawLine(document.getElementById("capital"), [{name:"Capital",values:arr(p=>p.portfolio.current_capital)},{name:"PnL",values:arr(p=>p.portfolio.total_pnl)}], colors);
+      drawLine(document.getElementById("risk"), [{name:"Sharpe",values:arr(p=>p.risk.sharpe_ratio)},{name:"Sortino",values:arr(p=>p.risk.sortino_ratio)},{name:"Calmar",values:arr(p=>p.risk.calmar_ratio)}], colors);
+      drawLine(document.getElementById("roi"), [{name:"Daily",values:arr(p=>p.portfolio.daily_roi)},{name:"Weekly",values:arr(p=>p.portfolio.weekly_roi)},{name:"Monthly",values:arr(p=>p.portfolio.monthly_roi)}], colors);
+      drawLine(document.getElementById("winDrawdown"), [{name:"Win%",values:arr(p=>p.trade_stats.win_rate)},{name:"MaxDD",values:arr(p=>p.risk.max_drawdown)}], colors);
+      drawLine(document.getElementById("fusion"), [{name:"Fusion",values:arr(p=>p.fusion_ml.fusion_score)},{name:"ML Edge",values:arr(p=>p.fusion_ml.ml_edge_score)},{name:"ML pUP",values:arr(p=>p.fusion_ml.ml_prediction)}], colors);
+      drawLine(document.getElementById("signals"), [{name:"Signals",values:arr(p=>p.fusion_ml.fusion_num_signals)}], colors);
+      drawLine(document.getElementById("orders"), [{name:"Entry",values:arr(p=>p.latest_order?.entry_price || 0)},{name:"Size",values:arr(p=>p.latest_order?.size_usd || 0)}], colors);
+      drawLine(document.getElementById("processorScores"), PROCESSORS.slice(0,6).map(name => ({name, values: arr(p => (p.processor_scores || {})[name])})), colors);
+      drawLine(document.getElementById("processorDirections"), PROCESSORS.slice(0,6).map(name => ({name, values: arr(p => (p.processor_directions || {})[name])})), colors);
+    }
+    async function refresh() {
+      try {
+        const [snap, hist] = await Promise.all([
+          fetch("/api/dashboard/snapshot", {cache:"no-store"}).then(r => r.json()),
+          fetch("/api/dashboard/history?limit=900", {cache:"no-store"}).then(r => r.json())
+        ]);
+        render(snap);
+        drawCharts(hist);
+        document.getElementById("status").textContent = "在线";
+        document.getElementById("status").className = "ok";
+        document.getElementById("updated").textContent = new Date(snap.timestamp).toLocaleTimeString();
+      } catch (e) {
+        document.getElementById("status").textContent = "离线";
+        document.getElementById("status").className = "bad";
+      }
+    }
+    refresh();
+    setInterval(refresh, 2000);
+    addEventListener("resize", () => refresh());
+  </script>
+</body>
+</html>"""
 
 
 _grafana_exporter_instance: Optional[GrafanaMetricsExporter] = None

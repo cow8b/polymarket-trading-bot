@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from loguru import logger
+from bot.shutdown import install_shutdown_signal_handlers, shutdown_node
 from rich import box
 from rich.align import Align
 from rich.console import Console, Group
@@ -629,6 +630,11 @@ def _refresh_status(hub: TerminalUIHub, strategy: Any) -> None:
         hub.set_status("Loading instruments…")
 
 
+def _stop_node(node: Any, thread: Optional[threading.Thread] = None, timeout: float = 5.0) -> None:
+    """Request Nautilus shutdown, then dispose without hanging Ctrl+C."""
+    shutdown_node(node, thread, timeout=max(10.0, timeout))
+
+
 def run_bot_session(
     boot_fn: Callable[[], Tuple[Any, Any, bool]],
     *,
@@ -687,6 +693,7 @@ def run_bot_session(
                 raise build_error[0]
 
             node, strategy, redis_ok = build_result[0]  # type: ignore[misc]
+            install_shutdown_signal_handlers()
             register_strategy(
                 strategy,
                 simulation=simulation,
@@ -715,11 +722,7 @@ def run_bot_session(
     except KeyboardInterrupt:
         pass
     finally:
-        if node is not None:
-            try:
-                node.dispose()
-            except Exception:
-                pass
+        _stop_node(node, node_thread)
 
     if node_error:
         raise node_error[0]
@@ -735,6 +738,7 @@ def run_node_with_dashboard(
     refresh_hz: float = 2.0,
 ) -> None:
     """Run the Nautilus node in a background thread behind the live TUI."""
+    install_shutdown_signal_handlers()
     register_strategy(strategy, simulation=simulation, test_mode=test_mode, redis_ok=redis_ok)
     hub = get_hub()
     hub.set_status("Monitoring positions")
@@ -783,10 +787,7 @@ def run_node_with_dashboard(
     except KeyboardInterrupt:
         pass
     finally:
-        try:
-            node.dispose()
-        except Exception:
-            pass
+        _stop_node(node, thread)
 
     if node_error:
         raise node_error[0]
