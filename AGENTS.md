@@ -33,6 +33,9 @@ python scripts/test_execution.py test
 ```
 
 使用 `python scripts/view_trades.py` 查看模拟交易历史。
+机器人停机后，先使用
+`python scripts/reconcile_trades.py --dry-run --mode paper` 预览遗留待结算交易；
+只有确认官方结果与盈亏正确后，才使用 `--apply` 写回 MySQL。该命令不会下单或自动赎回。
 
 ## 代码风格与命名约定
 

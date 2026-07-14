@@ -299,6 +299,23 @@ class TradeHistoryRepository:
             payloads = conn.execute(stmt).scalars().all()
         return [json.loads(payload) for payload in payloads]
 
+    def load_pending(
+        self,
+        trade_type: str,
+        trade_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """只读取待结算交易，避免补结算命令扫描完整历史。"""
+        stmt = select(trade_history.c.payload_json).where(
+            trade_history.c.trade_type == trade_type,
+            trade_history.c.outcome == "PENDING",
+        )
+        if trade_id:
+            stmt = stmt.where(trade_history.c.trade_id == trade_id)
+        stmt = stmt.order_by(trade_history.c.timestamp, trade_history.c.trade_id)
+        with self.engine.connect() as conn:
+            payloads = conn.execute(stmt).scalars().all()
+        return [json.loads(payload) for payload in payloads]
+
     @staticmethod
     def _serialize_rows(
         trade_type: str, trades: Iterable[Dict[str, Any]]
@@ -352,6 +369,29 @@ class TradeHistoryRepository:
                 if result.rowcount == 0:
                     conn.execute(insert(trade_history), row)
         return len(rows)
+
+    def settle_pending(self, trade_type: str, trade: Dict[str, Any]) -> bool:
+        """仅在记录仍为 PENDING 时写入结算结果，防止并发覆盖。"""
+        rows = self._serialize_rows(trade_type, [trade])
+        if not rows:
+            return False
+        row = rows[0]
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(trade_history)
+                .where(
+                    trade_history.c.trade_type == row["trade_type"],
+                    trade_history.c.trade_id == row["trade_id"],
+                    trade_history.c.outcome == "PENDING",
+                )
+                .values(
+                    timestamp=row["timestamp"],
+                    outcome=row["outcome"],
+                    payload_json=row["payload_json"],
+                    updated_at=row["updated_at"],
+                )
+            )
+        return result.rowcount == 1
 
 
 class DashboardStateRepository:

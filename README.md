@@ -150,6 +150,31 @@ See `.env.example` for the full list with inline comments.
 python scripts/view_trades.py
 ```
 
+### Reconcile trades left pending after shutdown
+
+Preview pending MySQL records first; the default mode is read-only:
+
+```bash
+python scripts/reconcile_trades.py --dry-run --mode paper
+```
+
+After verifying the held outcome, official result, and PnL, write the settlement:
+
+```bash
+python scripts/reconcile_trades.py --apply --mode paper
+```
+
+For continuous paper/live reconciliation, run:
+
+```bash
+python scripts/reconcile_trades.py --apply --mode both --watch --interval 30
+```
+
+The command never places orders or redeems positions. It updates only existing
+MySQL `PENDING` rows whose Gamma market is closed, resolved, and has an
+unambiguous `1/0` outcome. Use `--trade-id` for one record or `--older-than 5`
+to wait at least five minutes after market end.
+
 ---
 
 ## Monitoring

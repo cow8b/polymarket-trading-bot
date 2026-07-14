@@ -190,6 +190,37 @@ python supervisor.py --live
 python scripts/view_trades.py
 ```
 
+### 停机交易补结算
+
+机器人停机后，使用独立命令处理 MySQL 中遗留的 `PENDING` 交易。先执行只读预览：
+
+```bash
+python scripts/reconcile_trades.py --dry-run --mode paper
+```
+
+确认持仓方向、官方结果和盈亏无误后再写回：
+
+```bash
+python scripts/reconcile_trades.py --apply --mode paper
+```
+
+其他常用方式：
+
+```bash
+# 同时检查模拟和实盘记录中的指定交易
+python scripts/reconcile_trades.py --dry-run --mode both --trade-id TRADE_ID
+
+# 每 30 秒检查一次，Ctrl+C 可干净退出
+python scripts/reconcile_trades.py --apply --mode both --watch --interval 30
+
+# 仅处理市场结束至少 5 分钟的记录
+python scripts/reconcile_trades.py --apply --mode paper --older-than 5
+```
+
+未指定 `--apply` 时默认只读。该命令不会下单或自动赎回；仅当 Gamma
+显示市场已关闭、状态为 `resolved` 且结果为唯一明确的 `1/0` 时才允许写回。
+它只处理已经保存到 MySQL 的 `PENDING` 记录，不会从交易所反向创建缺失交易。
+
 ---
 
 ## 数据存储与缓存

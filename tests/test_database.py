@@ -102,6 +102,42 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(trades[0]["outcome"], "PENDING")
         self.assertEqual(trades[1]["outcome"], "WIN")
 
+    def test_settle_pending_is_conditional_and_idempotent(self) -> None:
+        repository = TradeHistoryRepository(self.engine)
+        pending = {
+            "trade_id": "paper_1",
+            "timestamp": "2026-07-14T10:00:00+00:00",
+            "outcome": "PENDING",
+        }
+        repository.upsert("paper", [pending])
+
+        settled = {**pending, "outcome": "WIN", "pnl_usd": 10.0}
+        self.assertTrue(repository.settle_pending("paper", settled))
+        self.assertFalse(repository.settle_pending("paper", {**settled, "pnl_usd": -10.0}))
+        self.assertEqual(repository.load("paper")[0]["pnl_usd"], 10.0)
+
+    def test_load_pending_filters_in_database(self) -> None:
+        repository = TradeHistoryRepository(self.engine)
+        repository.upsert(
+            "paper",
+            [
+                {
+                    "trade_id": "pending",
+                    "timestamp": "2026-07-14T10:00:00+00:00",
+                    "outcome": "PENDING",
+                },
+                {
+                    "trade_id": "settled",
+                    "timestamp": "2026-07-14T10:01:00+00:00",
+                    "outcome": "WIN",
+                },
+            ],
+        )
+        self.assertEqual(
+            [row["trade_id"] for row in repository.load_pending("paper")],
+            ["pending"],
+        )
+
     def test_dashboard_state_round_trip(self) -> None:
         repository = DashboardStateRepository(self.engine)
         state = {"history": [{"ts": "now"}], "events": [{"type": "BUY"}]}
