@@ -9,18 +9,19 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
+from sqlalchemy import and_, func, insert, select, update
+from sqlalchemy.engine import Engine
 
+from core.database import initialize_database, signal_cycles
 from core.strategy.fusion import FusedSignal
 from core.strategy.processors.base import TradingSignal
 
-RECORDINGS_DB = os.getenv("SIGNAL_RECORDINGS_DB", "signal_recordings.db")
 RESOLVE_INTERVAL_SEC = float(os.getenv("SIGNAL_RECORDING_RESOLVE_SEC", "15"))
 
 
@@ -60,47 +61,14 @@ class SignalRecorder:
     def __init__(
         self,
         price_fn: Optional[Callable[[], Optional[float]]] = None,
-        db_path: str = RECORDINGS_DB,
+        engine: Optional[Engine] = None,
     ):
         self._price_fn = price_fn
-        self.db_path = db_path
+        self.engine = initialize_database(engine=engine)
         self._lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._stop_event = threading.Event()
-        self._init_db()
-
-    def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS signal_cycles (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    recorded_at     TEXT NOT NULL,
-                    market_slug     TEXT NOT NULL,
-                    market_start_ts REAL,
-                    market_end_ts   REAL,
-                    poly_price      REAL,
-                    btc_spot        REAL,
-                    ml_p_up         REAL,
-                    signals_json    TEXT NOT NULL,
-                    fused_json      TEXT,
-                    metadata_json   TEXT,
-                    btc_entry       REAL,
-                    btc_exit        REAL,
-                    outcome         INTEGER,
-                    resolved_at     TEXT
-                )
-                """
-            )
-            conn.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_signal_cycles_pending
-                ON signal_cycles (market_end_ts)
-                WHERE outcome IS NULL
-                """
-            )
-            conn.commit()
 
     def start(self) -> None:
         if self._running:
@@ -113,7 +81,7 @@ class SignalRecorder:
             daemon=True,
         )
         self._thread.start()
-        logger.info(f"SignalRecorder started (db={self.db_path})")
+        logger.info("SignalRecorder started (storage=MySQL)")
 
     def stop(self) -> None:
         self._running = False
@@ -151,22 +119,8 @@ class SignalRecorder:
             "metadata_json": json.dumps(metadata or {}),
         }
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    """
-                    INSERT INTO signal_cycles (
-                        recorded_at, market_slug, market_start_ts, market_end_ts,
-                        poly_price, btc_spot, ml_p_up,
-                        signals_json, fused_json, metadata_json
-                    ) VALUES (
-                        :recorded_at, :market_slug, :market_start_ts, :market_end_ts,
-                        :poly_price, :btc_spot, :ml_p_up,
-                        :signals_json, :fused_json, :metadata_json
-                    )
-                    """,
-                    payload,
-                )
-                conn.commit()
+            with self.engine.begin() as conn:
+                conn.execute(insert(signal_cycles), payload)
 
     def _resolve_loop(self) -> None:
         while self._running:
@@ -186,84 +140,81 @@ class SignalRecorder:
             return
 
         with self._lock:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
+            with self.engine.begin() as conn:
                 rows = conn.execute(
-                    """
-                    SELECT market_slug, market_start_ts, market_end_ts
-                    FROM signal_cycles
-                    WHERE outcome IS NULL
-                      AND market_end_ts IS NOT NULL
-                      AND market_end_ts <= ?
-                    GROUP BY market_slug, market_start_ts, market_end_ts
-                    """,
-                    (now,),
-                ).fetchall()
+                    select(
+                        signal_cycles.c.market_slug,
+                        signal_cycles.c.market_start_ts,
+                        signal_cycles.c.market_end_ts,
+                    )
+                    .where(
+                        signal_cycles.c.outcome.is_(None),
+                        signal_cycles.c.market_end_ts.is_not(None),
+                        signal_cycles.c.market_end_ts <= now,
+                    )
+                    .group_by(
+                        signal_cycles.c.market_slug,
+                        signal_cycles.c.market_start_ts,
+                        signal_cycles.c.market_end_ts,
+                    )
+                ).mappings().all()
 
                 for row in rows:
-                    entry_row = conn.execute(
-                        """
-                        SELECT btc_spot
-                        FROM signal_cycles
-                        WHERE market_slug = ?
-                          AND market_start_ts IS ?
-                          AND market_end_ts IS ?
-                          AND btc_spot IS NOT NULL
-                        ORDER BY id ASC
-                        LIMIT 1
-                        """,
-                        (row["market_slug"], row["market_start_ts"], row["market_end_ts"]),
-                    ).fetchone()
+                    market_match = [signal_cycles.c.market_slug == row["market_slug"]]
+                    for column, value in (
+                        (signal_cycles.c.market_start_ts, row["market_start_ts"]),
+                        (signal_cycles.c.market_end_ts, row["market_end_ts"]),
+                    ):
+                        market_match.append(column.is_(None) if value is None else column == value)
+
+                    entry_price = conn.execute(
+                        select(signal_cycles.c.btc_spot)
+                        .where(
+                            and_(*market_match),
+                            signal_cycles.c.btc_spot.is_not(None),
+                        )
+                        .order_by(signal_cycles.c.id.asc())
+                        .limit(1)
+                    ).scalar_one_or_none()
 
                     entry_price = (
-                        float(entry_row["btc_spot"])
-                        if entry_row and entry_row["btc_spot"] is not None
-                        else exit_price
+                        float(entry_price) if entry_price is not None else exit_price
                     )
                     outcome = 1 if exit_price > entry_price else 0
                     resolved_at = datetime.now(timezone.utc).isoformat()
 
                     conn.execute(
-                        """
-                        UPDATE signal_cycles
-                        SET btc_entry = ?,
-                            btc_exit = ?,
-                            outcome = ?,
-                            resolved_at = ?
-                        WHERE market_slug = ?
-                          AND market_start_ts IS ?
-                          AND market_end_ts IS ?
-                          AND outcome IS NULL
-                        """,
-                        (
-                            entry_price,
-                            exit_price,
-                            outcome,
-                            resolved_at,
-                            row["market_slug"],
-                            row["market_start_ts"],
-                            row["market_end_ts"],
-                        ),
+                        update(signal_cycles)
+                        .where(and_(*market_match), signal_cycles.c.outcome.is_(None))
+                        .values(
+                            btc_entry=entry_price,
+                            btc_exit=exit_price,
+                            outcome=outcome,
+                            resolved_at=resolved_at,
+                        )
                     )
 
                 if rows:
-                    conn.commit()
                     logger.info(
                         f"SignalRecorder resolved {len(rows)} market(s) "
                         f"(exit={exit_price:.2f})"
                     )
 
     def get_stats(self) -> Dict[str, Any]:
-        with sqlite3.connect(self.db_path) as conn:
-            total = conn.execute("SELECT COUNT(*) FROM signal_cycles").fetchone()[0]
+        with self.engine.connect() as conn:
+            total = conn.execute(select(func.count()).select_from(signal_cycles)).scalar_one()
             pending = conn.execute(
-                "SELECT COUNT(*) FROM signal_cycles WHERE outcome IS NULL"
-            ).fetchone()[0]
+                select(func.count()).select_from(signal_cycles).where(
+                    signal_cycles.c.outcome.is_(None)
+                )
+            ).scalar_one()
             resolved = conn.execute(
-                "SELECT COUNT(*) FROM signal_cycles WHERE outcome IS NOT NULL"
-            ).fetchone()[0]
+                select(func.count()).select_from(signal_cycles).where(
+                    signal_cycles.c.outcome.is_not(None)
+                )
+            ).scalar_one()
         return {
-            "db_path": self.db_path,
+            "storage": "mysql",
             "total_cycles": total,
             "pending_resolution": pending,
             "resolved_cycles": resolved,

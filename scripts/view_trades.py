@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import os
 import sys
 import time
@@ -32,23 +31,22 @@ from rich.rule import Rule
 from rich.columns import Columns
 from rich import box
 
-console = Console()
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-TRADES_FILE      = Path(__file__).parent.parent / "paper_trades.json"
-LIVE_TRADES_FILE = Path(__file__).parent.parent / "live_trades.json"
+from core.database import TradeHistoryRepository
+
+console = Console()
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
-def load_trades(path=TRADES_FILE) -> List[Dict[str, Any]]:
-    if not Path(path).exists():
-        return []
+def load_trades(trade_type: str = "paper") -> List[Dict[str, Any]]:
     try:
-        with open(path, encoding="utf-8") as f:
-            d = json.load(f)
-        return d if isinstance(d, list) else []
+        return TradeHistoryRepository().load(trade_type)
     except Exception as e:
-        console.print(f"[red]Error loading trades:[/red] {e}")
+        console.print(f"[red]从 MySQL 读取交易失败：[/red] {e}")
         return []
 
 
@@ -437,28 +435,27 @@ def main() -> None:
     parser.add_argument("--summary", action="store_true",     help="Summary stats only")
     parser.add_argument("--csv",     action="store_true",     help="Export to CSV")
     parser.add_argument("--watch",   action="store_true",     help="Auto-refresh every 10 seconds")
-    parser.add_argument("--file",    type=str,  default=str(TRADES_FILE))
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--live",  action="store_true", help="Show live trades (live_trades.json)")
+    mode.add_argument("--live",  action="store_true", help="Show live trades from MySQL")
     mode.add_argument("--both",  action="store_true", help="Show paper AND live trades")
     args = parser.parse_args()
 
     if args.live:
-        paper_path = None
-        live_path  = LIVE_TRADES_FILE
+        show_paper = False
+        show_live = True
     elif args.both:
-        paper_path = Path(args.file)
-        live_path  = LIVE_TRADES_FILE
+        show_paper = True
+        show_live = True
     else:
-        paper_path = Path(args.file)
-        live_path  = None
+        show_paper = True
+        show_live = False
 
     def render() -> None:
         if args.watch:
             console.clear()
 
-        if paper_path is not None:
-            paper = load_trades(paper_path)
+        if show_paper:
+            paper = load_trades("paper")
             if paper or not args.live:
                 console.print(Rule("[bold white]PAPER / SIMULATION TRADES[/bold white]", style="white"))
                 s = compute_stats(paper)
@@ -466,10 +463,10 @@ def main() -> None:
                 if not args.summary:
                     print_trade_table(paper, limit=args.last)
                 if args.csv:
-                    export_csv(paper, path=str(paper_path).replace(".json", ".csv"))
+                    export_csv(paper, path=str(ROOT_DIR / "paper_trades.csv"))
 
-        if live_path is not None:
-            live = load_trades(live_path)
+        if show_live:
+            live = load_trades("live")
             if live:
                 console.print(Rule("[bold green]LIVE TRADES[/bold green]", style="green"))
                 s = compute_stats(live)
@@ -477,9 +474,9 @@ def main() -> None:
                 if not args.summary:
                     print_live_trade_table(live, limit=args.last)
                 if args.csv:
-                    export_csv(live, path=str(live_path).replace(".json", ".csv"))
+                    export_csv(live, path=str(ROOT_DIR / "live_trades.csv"))
             else:
-                console.print("[dim]No live trades found in live_trades.json[/dim]")
+                console.print("[dim]MySQL 中没有实盘交易[/dim]")
 
         if args.watch:
             console.print(

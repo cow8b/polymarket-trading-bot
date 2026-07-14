@@ -101,6 +101,7 @@ from prometheus_client import (
     generate_latest,
 )
 
+from core.database import DashboardStateRepository
 from monitoring.performance_tracker import get_performance_tracker
 from execution.risk_engine import get_risk_engine
 from execution.execution_engine import get_execution_engine
@@ -269,8 +270,9 @@ class GrafanaMetricsExporter:
         self._is_running = False
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
-        self._state_path = Path(
-            os.getenv("DASHBOARD_STATE_PATH", "runtime/dashboard/state.json")
+        self._state_repository = DashboardStateRepository(
+            history_limit=self._history.maxlen or 3600,
+            event_limit=self._dashboard_events.maxlen or 200,
         )
         self._persist_lock = threading.Lock()
         self._last_persist_at = 0.0
@@ -721,16 +723,17 @@ class GrafanaMetricsExporter:
                     "payload": payload,
                 }
                 self._dashboard_events.append(event)
-            self._persist_dashboard_state(force=True)
+            # 高频事件只更新内存，最多每 5 秒批量增量写入 MySQL；停机时会强制落盘。
+            self._persist_dashboard_state()
         except Exception as e:
             logger.debug(f"record_dashboard_event error: {e}")
 
     def _load_dashboard_state(self) -> None:
-        """恢复驾驶舱时间序列和事件，保证重启后仍可复盘。"""
-        if not self._state_path.exists():
-            return
+        """从 MySQL 恢复驾驶舱时间序列和事件。"""
         try:
-            raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+            raw = self._state_repository.load()
+            if raw is None:
+                return
             history = raw.get("history", []) if isinstance(raw, dict) else []
             events = raw.get("events", []) if isinstance(raw, dict) else []
             if isinstance(history, list):
@@ -754,7 +757,7 @@ class GrafanaMetricsExporter:
                 f"{len(self._dashboard_events)} 条事件"
             )
         except Exception as exc:
-            logger.warning(f"无法恢复驾驶舱状态 {self._state_path}: {exc}")
+            logger.warning(f"无法从 MySQL 恢复驾驶舱状态: {exc}")
 
     def _persist_dashboard_state(self, *, force: bool = False) -> None:
         """原子保存驾驶舱状态；高频行情最多每 5 秒写盘一次。"""
@@ -776,16 +779,10 @@ class GrafanaMetricsExporter:
                 "history": history,
                 "events": events,
             }
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self._state_path.with_suffix(".json.tmp")
-            tmp.write_text(
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-                encoding="utf-8",
-            )
-            tmp.replace(self._state_path)
+            self._state_repository.save(payload)
             self._last_persist_at = now
         except Exception as exc:
-            logger.warning(f"无法保存驾驶舱状态 {self._state_path}: {exc}")
+            logger.warning(f"无法将驾驶舱状态保存到 MySQL: {exc}")
         finally:
             self._persist_lock.release()
 

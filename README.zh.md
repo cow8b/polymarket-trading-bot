@@ -53,6 +53,7 @@
 ## 前置条件
 
 - **Python 3.14+**
+- **MySQL 8.0+ / MariaDB 10.6+** — 保存交易、信号、ML 样本和驾驶舱复盘数据
 - **Redis** — 用于模式切换与控制面行为
 - **Polymarket 账户** — 实盘交易需 API 凭证
 - **Git**
@@ -100,6 +101,14 @@ POLYMARKET_API_KEY=your_api_key_here
 POLYMARKET_API_SECRET=your_api_secret_here
 POLYMARKET_PASSPHRASE=your_passphrase_here
 
+DB_TYPE=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USERNAME=poly_bot
+DB_PASSWORD=your_database_password
+DB_DATABASE=poly_bot
+DB_AUTO_CREATE_TABLES=true
+
 REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_DB=2
@@ -112,7 +121,18 @@ MAX_TRADES_PER_MARKET=1
 MIN_ML_EDGE=0.10
 ```
 
-### 5. 启动 Redis
+### 5. 初始化 MySQL 数据
+
+首次部署或从旧版本升级时运行：
+
+```bash
+python scripts/migrate_to_mysql.py
+```
+
+该命令会创建数据库和缺失表，并在目标表为空时迁移旧的 SQLite/JSON
+历史；不会删除旧文件，也不会覆盖已有 MySQL 数据。
+
+### 6. 启动 Redis
 
 ```bash
 redis-server
@@ -121,7 +141,7 @@ redis-server
 macOS（Homebrew）：`brew install redis && redis-server`  
 Debian/Ubuntu：`sudo apt install redis-server && redis-server`
 
-### 6. 运行机器人
+### 7. 运行机器人
 
 ```bash
 # 快速测试（模拟交易，约每分钟一次）
@@ -162,7 +182,8 @@ python supervisor.py --live
 
 - **统一入口**：`main.py` 支持 `--test-mode`、`--simulation`、`--live`。
 - **自动重启**：`supervisor.py` 循环运行 `main.py`，适合无人值守。
-- **查看纸面交易**：
+- **数据持久化**：策略信号、ML 特征、模拟/实盘交易和驾驶舱状态统一保存到 MySQL。
+- **查看纸面交易**：以下命令直接查询 MySQL。
 
 ```bash
 python scripts/view_trades.py

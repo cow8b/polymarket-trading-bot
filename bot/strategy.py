@@ -8,7 +8,6 @@ execution depending on the current simulation mode.
 from __future__ import annotations
 
 import asyncio
-import json
 import math
 import os
 import random
@@ -17,7 +16,6 @@ import time
 from collections import deque
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -37,6 +35,7 @@ from bot.models import (
     PaperTrade,
     _make_stub_signal,
 )
+from core.database import TradeHistoryRepository
 from core.recording import get_signal_recorder
 from core.settlement import get_settlement_tracker
 from core.strategy.fusion import get_fusion_engine
@@ -284,7 +283,7 @@ class IntegratedBTCStrategy(Strategy):
         self._market_last_entry_held_price: Dict[str, float] = {}
 
         # ── Live realised-P&L tracking ──────────────────────────────────────
-        # Closed live trades, mirror of `paper_trades.json` for the live path.
+        # 已平仓实盘交易会与模拟交易一起写入 MySQL。
         self.live_trades: List[LiveTrade] = []
         self._live_session_num: int = 0
         # Hard cap (seconds after market end) before we give up waiting for a
@@ -372,6 +371,7 @@ class IntegratedBTCStrategy(Strategy):
         self.risk_engine = get_risk_engine()
         self.performance_tracker = get_performance_tracker()
         self.learning_engine = get_learning_engine()
+        self.trade_history_repository = TradeHistoryRepository()
         self.ml_engine = get_ml_engine()
         self.settlement_tracker = get_settlement_tracker()
         # Records every decision cycle (all processor signals + fused result +
@@ -429,34 +429,29 @@ class IntegratedBTCStrategy(Strategy):
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _load_trade_history(self) -> None:
-        """恢复已持久化交易用于累计统计和重启后复盘。
+        """从 MySQL 恢复交易，用于累计统计和重启后复盘。
 
         历史 PENDING 记录只作为审计记录恢复，不重新创建活动仓位；活动仓位
         需要交易所订单状态和实时订阅，盲目恢复会造成重复退出订单。
         """
         loaders = (
-            (Path("paper_trades.json"), PaperTrade, "paper_trades"),
-            (Path("live_trades.json"), LiveTrade, "live_trades"),
+            ("paper", PaperTrade, "paper_trades"),
+            ("live", LiveTrade, "live_trades"),
         )
-        for path, model, attr in loaders:
-            if not path.exists():
-                continue
+        for trade_type, model, attr in loaders:
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(raw, list):
-                    raise ValueError("根节点必须是数组")
+                raw = self.trade_history_repository.load(trade_type)
                 restored = []
                 for item in raw:
-                    if not isinstance(item, dict):
-                        continue
                     try:
                         restored.append(model.from_dict(item))
                     except Exception as exc:
-                        logger.warning(f"跳过损坏的历史交易 {path.name}: {exc}")
+                        logger.warning(f"跳过损坏的 {trade_type} 历史交易: {exc}")
                 setattr(self, attr, restored)
-                logger.info(f"已从 {path.name} 恢复 {len(restored)} 条交易记录")
+                logger.info(f"已从 MySQL 恢复 {len(restored)} 条 {trade_type} 交易记录")
             except Exception as exc:
-                logger.warning(f"无法恢复 {path.name}: {exc}")
+                logger.error(f"无法从 MySQL 恢复 {trade_type} 交易: {exc}")
+                raise
         self._live_session_num = max(
             (trade.session_trade_num for trade in self.live_trades),
             default=0,
@@ -3320,12 +3315,9 @@ class IntegratedBTCStrategy(Strategy):
     def _save_paper_trades(self) -> None:
         try:
             trades_data = [t.to_dict() for t in self.paper_trades]
-            path = Path("paper_trades.json")
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(trades_data, indent=2), encoding="utf-8")
-            tmp.replace(path)
+            self.trade_history_repository.replace("paper", trades_data)
         except Exception as e:
-            logger.error(f"Failed to save paper trades: {e}")
+            logger.error(f"无法将模拟交易写入 MySQL: {e}")
 
     # ── Real order ────────────────────────────────────────────────────────────
 
@@ -4050,19 +4042,13 @@ class IntegratedBTCStrategy(Strategy):
         self._save_live_trades()
 
     def _save_live_trades(self) -> None:
-        """Persist closed live trades to ``live_trades.json`` atomically.
-
-        Write to a temporary sibling file first, then rename over the target
-        so a mid-write crash never leaves a corrupt JSON file.
-        """
+        """将已平仓实盘交易以单个事务持久化到 MySQL。"""
         try:
-            path = Path("live_trades.json")
-            tmp = path.with_suffix(".json.tmp")
-            payload = json.dumps([t.to_dict() for t in self.live_trades], indent=2)
-            tmp.write_text(payload, encoding="utf-8")
-            tmp.replace(path)  # atomic on POSIX; near-atomic on Windows (NTFS)
+            self.trade_history_repository.replace(
+                "live", [trade.to_dict() for trade in self.live_trades]
+            )
         except Exception as e:
-            logger.warning(f"Failed to save live trades: {e}")
+            logger.warning(f"无法将实盘交易写入 MySQL: {e}")
 
     def _settle_open_positions(self, now: datetime) -> None:
         """Resolve realised P&L for positions whose market has already ended.

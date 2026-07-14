@@ -27,13 +27,20 @@ from __future__ import annotations
 
 import os
 import pickle
-import sqlite3
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from loguru import logger
+from sqlalchemy import func, insert, select, update
+from sqlalchemy.engine import Engine
+
+from core.database import (
+    ML_FEATURE_NAMES,
+    initialize_database,
+    ml_feature_trades,
+)
 
 try:
     import xgboost as xgb
@@ -50,32 +57,11 @@ except ImportError:
 
 
 MODEL_PATH   = "ml_model.pkl"
-DB_PATH      = "feature_store.db"
 MIN_SAMPLES  = 200
 MIN_EDGE     = 0.07
 RETRAIN_DAYS = 7
 
-FEATURE_NAMES = [
-    "rsi", "macd_line", "macd_signal", "pct_b",
-    "ret1", "ret3", "ret5", "ret15",
-    "vol_regime",
-    "cvd_delta_norm",
-    "ob_imbalance",
-    "funding_rate",
-    "oi_change",
-    "liq_imbalance",
-    "liq_total_norm",
-    "tick_vel_60s",
-    "tick_vel_30s",
-    "poly_ob_imbalance",
-    "spot_momentum",
-    "poly_prob",
-    "hour_sin",
-    "hour_cos",
-    "is_ny_open",
-    "is_asia_open",
-    "is_dead_zone",
-]
+FEATURE_NAMES = list(ML_FEATURE_NAMES)
 
 
 def _vol_regime_to_int(regime: str) -> int:
@@ -102,23 +88,22 @@ class MLPredictionEngine:
     def __init__(
         self,
         model_path: str = MODEL_PATH,
-        db_path: str = DB_PATH,
         min_edge: float = MIN_EDGE,
         min_samples: int = MIN_SAMPLES,
         retrain_days: int = RETRAIN_DAYS,
+        engine: Optional[Engine] = None,
     ):
         self.model_path = model_path
-        self.db_path = db_path
         self.min_edge = min_edge
         self.min_samples = min_samples
         self.retrain_days = retrain_days
+        self.engine = initialize_database(engine=engine)
 
         self._model = None
         self._model_lock = threading.RLock()
         self._last_retrain: Optional[datetime] = None
         self._sample_count = 0
 
-        self._init_db()
         self._load_model()
         self._refresh_sample_count()
 
@@ -128,34 +113,14 @@ class MLPredictionEngine:
             f"min_edge={min_edge:.0%}"
         )
 
-    # ── Database ─────────────────────────────────────────────────────────────
-
-    def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS trades (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp       TEXT NOT NULL,
-                    market_slug     TEXT,
-                    poly_price      REAL NOT NULL,
-                    {', '.join(f'{f} REAL' for f in FEATURE_NAMES)},
-                    outcome         INTEGER,
-                    chainlink_entry REAL,
-                    chainlink_exit  REAL,
-                    created_at      TEXT DEFAULT (datetime('now'))
-                )
-                """
-            )
-            conn.commit()
-
     def _refresh_sample_count(self) -> None:
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                row = conn.execute(
-                    "SELECT COUNT(*) FROM trades WHERE outcome IS NOT NULL"
-                ).fetchone()
-                self._sample_count = row[0] if row else 0
+            with self.engine.connect() as conn:
+                self._sample_count = conn.execute(
+                    select(func.count()).select_from(ml_feature_trades).where(
+                        ml_feature_trades.c.outcome.is_not(None)
+                    )
+                ).scalar_one()
         except Exception:
             self._sample_count = 0
 
@@ -268,21 +233,20 @@ class MLPredictionEngine:
     ) -> Optional[int]:
         try:
             feat_dict = dict(zip(FEATURE_NAMES, feature_vector.tolist()))
-            cols = ["timestamp", "market_slug", "poly_price", "chainlink_entry"] + FEATURE_NAMES
-            vals = [
-                datetime.now(timezone.utc).isoformat(),
-                market_slug,
-                poly_price,
-                chainlink_entry,
-            ] + [feat_dict[f] for f in FEATURE_NAMES]
-
-            with sqlite3.connect(self.db_path) as conn:
-                cur = conn.execute(
-                    f"INSERT INTO trades ({', '.join(cols)}) VALUES ({', '.join(['?']*len(cols))})",
-                    vals,
+            now = datetime.now(timezone.utc).isoformat()
+            payload = {
+                "timestamp": now,
+                "market_slug": market_slug,
+                "poly_price": poly_price,
+                "chainlink_entry": chainlink_entry,
+                "created_at": now,
+                **feat_dict,
+            }
+            with self.engine.begin() as conn:
+                result = conn.execute(
+                    insert(ml_feature_trades).values(**payload)
                 )
-                conn.commit()
-                return cur.lastrowid
+                return int(result.inserted_primary_key[0])
         except Exception as e:
             logger.warning(f"Failed to record trade: {e}")
             return None
@@ -295,12 +259,16 @@ class MLPredictionEngine:
         outcome: int,
     ) -> None:
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self.engine.begin() as conn:
                 conn.execute(
-                    "UPDATE trades SET outcome=?, chainlink_entry=?, chainlink_exit=? WHERE id=?",
-                    (outcome, chainlink_entry, chainlink_exit, trade_id),
+                    update(ml_feature_trades)
+                    .where(ml_feature_trades.c.id == trade_id)
+                    .values(
+                        outcome=outcome,
+                        chainlink_entry=chainlink_entry,
+                        chainlink_exit=chainlink_exit,
+                    )
                 )
-                conn.commit()
             self._sample_count += 1
             logger.info(
                 f"Recorded outcome for trade {trade_id}: "
@@ -325,11 +293,13 @@ class MLPredictionEngine:
             return False
 
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            columns = [ml_feature_trades.c[name] for name in FEATURE_NAMES]
+            with self.engine.connect() as conn:
                 rows = conn.execute(
-                    f"SELECT {', '.join(FEATURE_NAMES)}, outcome FROM trades "
-                    f"WHERE outcome IS NOT NULL ORDER BY id"
-                ).fetchall()
+                    select(*columns, ml_feature_trades.c.outcome)
+                    .where(ml_feature_trades.c.outcome.is_not(None))
+                    .order_by(ml_feature_trades.c.id)
+                ).all()
 
             if len(rows) < self.min_samples:
                 return False

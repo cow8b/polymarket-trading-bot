@@ -10,7 +10,6 @@ Usage
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from datetime import datetime
@@ -125,7 +124,7 @@ def print_banner(simulation: bool, test_mode: bool) -> None:
 
     if test_mode:
         body.append("\n\nTrades → ", style="dim")
-        body.append("paper_trades.json", style="cyan")
+        body.append("MySQL / trade_history", style="cyan")
         body.append("   View → ", style="dim")
         body.append("python scripts/view_trades.py", style="cyan")
 
@@ -177,6 +176,18 @@ def preflight(simulation: bool, silent: bool = False) -> bool:
             table.add_row("[yellow]–[/yellow]", key,
                           Text("not set — settlement tracking disabled", style="yellow"))
 
+    try:
+        from sqlalchemy import text
+        from core.database import initialize_database
+
+        engine = initialize_database()
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        table.add_row("✓", "MySQL", Text("connected and schema ready", style="green"))
+    except Exception as exc:
+        table.add_row("[red]✗[/red]", "MySQL", Text(str(exc), style="bold red"))
+        ok = False
+
     optional = [
         ("xgboost",    "ML model"),
         ("sklearn",    "ML calibration"),
@@ -200,10 +211,11 @@ def preflight(simulation: bool, silent: bool = False) -> bool:
 
 # ── Live session dashboard ────────────────────────────────────────────────────
 
-def print_live_dashboard(paper_trades_path: str = "paper_trades.json") -> None:
+def print_live_dashboard() -> None:
     try:
-        with open(paper_trades_path) as f:
-            trades = json.load(f)
+        from core.database import TradeHistoryRepository
+
+        trades = TradeHistoryRepository().load("paper")
     except Exception:
         return
 
@@ -358,7 +370,7 @@ Examples:
         if not enable_tui:
             console.print()
             console.print(Rule("[yellow]Shutting down[/yellow]", style="yellow"))
-            console.print("  Trades saved to [cyan]paper_trades.json[/cyan]")
+            console.print("  Trades saved to [cyan]MySQL / trade_history[/cyan]")
             console.print("  View results:  [cyan]python scripts/view_trades.py[/cyan]")
             console.print()
     except Exception as e:
