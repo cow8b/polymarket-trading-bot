@@ -1,0 +1,57 @@
+name: polymarket-trading-bot
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: polymarket-trading-bot:local
+    container_name: polymarket-trading-bot
+    user: root
+    env_file:
+      - .env
+    environment:
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      DB_AUTO_CREATE_TABLES: "${DB_AUTO_CREATE_TABLES:-true}"
+      BOT_ARGS: "${BOT_ARGS:---live}"
+      LIVE_CONFIRM: "${LIVE_CONFIRM:-true}"
+      # Docker 部署直接访问外部服务，不继承 .env 中的本地代理。
+      POLYMARKET_PROXY_URL: ""
+      TZ: "${TZ:-Asia/Shanghai}"
+    working_dir: /data/project
+    tty: true
+    stdin_open: true
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        ln -sfn /var/lib/polymarket/ml_model.pkl /data/project/ml_model.pkl
+        exec python main.py $${BOT_ARGS}
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    ports:
+      - "${DASHBOARD_BIND_ADDRESS:-127.0.0.1}:${DASHBOARD_PORT:-8000}:8000"
+    volumes:
+      - .:/data/project
+      - bot_state:/var/lib/polymarket
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  bot_state:

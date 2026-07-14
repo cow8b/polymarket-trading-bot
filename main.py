@@ -278,6 +278,7 @@ Examples:
   python main.py --simulation           # normal simulation (15-min intervals)
   python main.py --live                 # REAL MONEY
   python main.py --test-mode --verbose  # with DEBUG logs
+  python main.py --simulation --tui     # enable terminal dashboard
   python main.py --test-mode --no-grafana
         """,
     )
@@ -297,7 +298,8 @@ Examples:
     )
 
     parser.add_argument("--no-grafana",  action="store_true", help="Disable Grafana metrics export")
-    parser.add_argument("--no-tui",      action="store_true", help="Disable live terminal dashboard (use stderr logs)")
+    parser.add_argument("--tui",         action="store_true", help="Enable live terminal dashboard")
+    parser.add_argument("--no-tui",      action="store_false", dest="tui", help="Deprecated; TUI is disabled by default")
     parser.add_argument("--verbose",     action="store_true", help="Enable DEBUG level logging")
     parser.add_argument("--skip-checks", action="store_true", help="Skip pre-flight env checks")
 
@@ -313,7 +315,7 @@ Examples:
         simulation = True
         test_mode  = False
 
-    enable_tui = not args.no_tui
+    enable_tui = bool(args.tui)
 
     if not enable_tui:
         print_promo()
@@ -334,7 +336,13 @@ Examples:
             ))
             sys.exit(1)
 
-    if not simulation and not enable_tui:
+    live_confirmed = os.getenv("LIVE_CONFIRM", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+    }
+    if not simulation and not enable_tui and not live_confirmed:
         console.print()
         console.print(Panel(
             "[bold red]LIVE TRADING MODE[/bold red]\n\n"
