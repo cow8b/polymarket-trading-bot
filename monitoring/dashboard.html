@@ -654,7 +654,7 @@
         ...(Array.isArray(live.positions) ? live.positions : [])
           .map(position => Number(position.unrealized_pnl)),
       ].filter(Number.isFinite).slice(-8);
-      renderDecision(live.decision || {}, flowPnls);
+      renderDecision(live.decision || {}, flowPnls, live);
       drawAll(s);
     }
     function renderPositions(s) {
@@ -782,7 +782,7 @@
       if (!text) return "—";
       return text.length <= 10 ? text : text.slice(-8);
     }
-    function renderDecision(decision, flowPnls=[]) {
+    function renderDecision(decision, flowPnls=[], live={}) {
       const nodeIds = ["nodeQuote","nodeMarket","nodeHistory","nodeFilter","nodeSignal","nodeFusion","nodeMl","nodeOrder","nodePosition","nodeSettle"];
       const edgeIds = ["e1","e2","e3","e4","e5","e6","e7","e8","e9","e10","e11","e12"];
       nodeIds.forEach(id => $(id)?.classList.remove("active", "completed", "blocked"));
@@ -791,15 +791,34 @@
         "DECISION START": {label:"启动决策", nodes:["nodeQuote","nodeMarket"], edges:["e1"]},
         "CONTEXT": {label:"构建市场上下文", nodes:["nodeHistory"], edges:["e2"]},
         "FILTER": {label:"检查入场条件", nodes:["nodeFilter"], edges:["e3"]},
-        "STEP 1": {label:"提取策略信号", nodes:["nodeSignal"], edges:["e4"]},
-        "STEP 2": {label:"融合多源信号", nodes:["nodeFusion"], edges:["e5","e7"]},
-        "STEP 3": {label:"评估模型优势", nodes:["nodeMl"], edges:["e6","e8"]},
-        "STEP 4": {label:"执行风险检查", nodes:["nodeMl"], edges:["e8"]},
+        "STEP 1": {label:"信号处理与融合", nodes:["nodeSignal","nodeFusion"], edges:["e4","e5","e7"]},
+        "STEP 2": {label:"模型概率预测", nodes:["nodeMl"], edges:["e6","e8"]},
+        "STEP 3": {label:"比较市场价格", nodes:["nodeMl"], edges:["e8"]},
+        "STEP 4": {label:"优势与方向确认", nodes:["nodeMl"], edges:["e8"]},
         "STEP 5": {label:"提交交易订单", nodes:["nodeOrder"], edges:["e9"]},
         "STEP 6": {label:"建立并跟踪仓位", nodes:["nodePosition"], edges:["e10"]},
         "SETTLE": {label:"退出并结算收益", nodes:["nodeSettle"], edges:["e11","e12"]},
       };
       const stages = Array.isArray(decision.stages) ? decision.stages : [];
+      if (!stages.length) {
+        const hasMarketPulse = Boolean(
+          live.quote_updated_at || live.orderbook_updated_at || live.candles_updated_at
+        );
+        if (hasMarketPulse) {
+          ["nodeQuote", "nodeMarket", "nodeHistory"].forEach(id => $(id)?.classList.add("active"));
+          ["e1", "e2"].forEach(id => $(id)?.classList.add("active"));
+          const mode = $("treeMode");
+          if (mode) {
+            const waitingText = live.trade_window_open
+              ? "模拟扫描 · 交易窗口打开"
+              : `模拟扫描 · ${live.next_window || "等待交易窗口"}`;
+            mode.textContent = live.mode === "live" ? "实盘扫描 · 等待策略触发" : waitingText;
+            mode.className = "tree-mode";
+          }
+          syncFlowEffects(flowPnls.length ? flowPnls : [0]);
+          return;
+        }
+      }
       stages.forEach(item => {
         const target = map[item.stage];
         if (!target) return;

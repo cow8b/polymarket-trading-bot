@@ -778,15 +778,22 @@ class IntegratedBTCStrategy(Strategy):
         now_iso = datetime.now(timezone.utc).isoformat()
         with self._dashboard_lock:
             stages = [dict(item) for item in self._decision_state.get("stages", [])]
-            for item in stages:
-                if item.get("status") == "active":
-                    item["status"] = "completed"
-            stages.append({
-                "stage": stage,
-                "title": title,
-                "status": status,
-                "timestamp": now_iso,
-            })
+            if stages and stages[-1].get("stage") == stage and stages[-1].get("status") == "active":
+                stages[-1].update({
+                    "title": title,
+                    "status": status,
+                    "timestamp": now_iso,
+                })
+            else:
+                for item in stages:
+                    if item.get("status") == "active":
+                        item["status"] = "completed"
+                stages.append({
+                    "stage": stage,
+                    "title": title,
+                    "status": status,
+                    "timestamp": now_iso,
+                })
             self._decision_state.update({
                 "status": "running",
                 "current_stage": stage,
@@ -1753,17 +1760,21 @@ class IntegratedBTCStrategy(Strategy):
         self._decision_cycle_counter += 1
         self._current_cycle_id = self._decision_cycle_counter
         self._current_cycle_outcome = "running"
+        now_iso = datetime.now(timezone.utc).isoformat()
         with self._dashboard_lock:
             self._decision_state = {
                 "cycle_id": self._current_cycle_id,
                 "status": "running",
                 "current_stage": "DECISION START",
                 "outcome": "",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "stages": [],
+                "updated_at": now_iso,
+                "stages": [{
+                    "stage": "DECISION START",
+                    "title": "MODE",
+                    "status": "active",
+                    "timestamp": now_iso,
+                }],
             }
-        # 紧接着的 DECISION START 日志会发布首个可视化阶段；这里不重复
-        # 发布，避免驾驶舱路径与事件流出现两个相同的起点。
         mode = "SIM" if is_simulation else "LIVE"
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         sep = "═" * self._STEP_BOX_WIDTH
