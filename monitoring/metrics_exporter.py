@@ -830,6 +830,9 @@ class GrafanaMetricsExporter:
                     "orderbook_updated_at",
                     "mode",
                     "total_volume_usd",
+                    "prediction_edge",
+                    "strategy_edge",
+                    "order_stats",
                 )
             }
             point = {
@@ -1028,10 +1031,36 @@ class GrafanaMetricsExporter:
                 "losing_trades_total": max(0, completed - wins),
                 "open_positions": len(positions),
                 "total_exposure": sum(float(p.get("size_usd", 0.0) or 0.0) for p in positions),
-                "orders_filled_total": max(
-                    snapshot["execution"]["orders_filled_total"], history_count
-                ),
             })
+            order_stats = live_state.get("order_stats", {}) or {}
+            entry_stats = order_stats.get("entry", {}) if isinstance(order_stats, dict) else {}
+            exit_stats = order_stats.get("exit", {}) if isinstance(order_stats, dict) else {}
+            if entry_stats:
+                snapshot["execution"].update({
+                    "orders_placed_total": int(entry_stats.get("submitted_total", 0) or 0),
+                    "orders_filled_total": max(
+                        history_count,
+                        int(entry_stats.get("filled_orders", 0) or 0),
+                    ),
+                    "orders_rejected_total": int(entry_stats.get("rejected_orders", 0) or 0),
+                    "entry_orders_submitted_total": int(
+                        entry_stats.get("submitted_total", 0) or 0
+                    ),
+                    "entry_orders_filled_total": int(
+                        entry_stats.get("filled_orders", 0) or 0
+                    ),
+                    "entry_fill_rate_pct": entry_stats.get("fill_rate_pct"),
+                    "entry_full_fill_rate_pct": entry_stats.get("full_fill_rate_pct"),
+                    "entry_notional_fill_rate_pct": entry_stats.get("notional_fill_rate_pct"),
+                    "order_stats_since": entry_stats.get("stats_since"),
+                    "exit_orders_submitted_total": int(exit_stats.get("submitted_total", 0) or 0),
+                    "exit_orders_filled_total": int(exit_stats.get("filled_orders", 0) or 0),
+                })
+            else:
+                # 升级前没有订单事实表时不伪造成交率；历史成交仍可作为数量参考。
+                snapshot["execution"]["orders_filled_total"] = max(
+                    snapshot["execution"]["orders_filled_total"], history_count
+                )
         return snapshot
 
     # ──────────────────────────────────────────────────────────────────────────

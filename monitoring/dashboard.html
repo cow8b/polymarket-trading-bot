@@ -262,7 +262,7 @@
         <div class="metric-grid">
           <div class="metric"><div class="k">总成交</div><div id="fills" class="v">0</div></div>
           <div class="metric"><div class="k">胜率</div><div id="winRate" class="v green">0.00%</div></div>
-          <div class="metric"><div class="k">做市优势</div><div id="edge" class="v green">+0.0%</div></div>
+          <div class="metric"><div class="k">当前预测优势</div><div id="edge" class="v yellow" title="通过风控的最近一笔信号，按可成交价计算；未扣手续费和额外滑点">—</div></div>
           <div class="metric"><div class="k">回撤风险 <span class="yellow">注意</span></div><div id="ddRisk" class="v yellow">0.0/10</div><div class="riskbar"><span id="ddBar" style="width:0%"></span></div></div>
         </div>
       </div>
@@ -365,7 +365,7 @@
           <div class="eff-table">
             <div class="eff-row"><span>CVD/盘口触发</span><b id="effStale" class="green">0</b></div>
             <div class="eff-row"><span>融合分数</span><b id="effFav" class="yellow">0.0</b></div>
-            <div class="eff-row"><span>订单成交率</span><b id="effFill" class="blue">0.0%</b></div>
+            <div class="eff-row"><span>入场成交率</span><b id="effFill" class="blue" title="有成交的入场订单数 / 已提交入场订单数">—</b></div>
             <div class="eff-row"><span>失败平仓率</span><b id="effLoss" class="red">0.0%</b></div>
             <div class="metric" style="margin-top:12px"><div class="k">仓位构建</div><div id="positionBuilt" class="v green">待命</div></div>
             <div class="metric" style="margin-top:8px"><div class="k">赎回状态</div><div id="redeemState" class="v yellow">观察</div></div>
@@ -400,7 +400,7 @@
           <div class="analytics-cell"><div class="analytics-label"><span>总收益</span><b id="analyticsPnl">$0.00</b></div><canvas id="analyticsPnlChart"></canvas></div>
           <div class="analytics-cell"><div class="analytics-label"><span>总成交额</span><b id="analyticsVolume">$0.00</b></div><canvas id="analyticsVolumeChart"></canvas></div>
           <div class="analytics-cell"><div class="analytics-label"><span>胜率</span><b id="analyticsWinRate">0.00%</b></div><canvas id="analyticsWinChart"></canvas></div>
-          <div class="analytics-cell"><div class="analytics-label"><span>策略优势</span><b id="analyticsEdge">0.00%</b></div><canvas id="analyticsEdgeChart"></canvas></div>
+          <div class="analytics-cell"><div class="analytics-label"><span>近50笔策略收益率</span><b id="analyticsEdge" title="已实现盈亏 / 入场本金；当前账本未单列手续费">—</b></div><canvas id="analyticsEdgeChart"></canvas></div>
         </div>
       </div>
     </footer>
@@ -414,6 +414,9 @@
         return `${value < 0 ? "-" : ""}$${Math.abs(value).toLocaleString(undefined, {maximumFractionDigits: 2, minimumFractionDigits: 2})}`;
       },
       pct: v => Number(v || 0).toFixed(2) + "%",
+      pctOrDash: v => v === null || v === undefined || !Number.isFinite(Number(v))
+        ? "—"
+        : Number(v).toFixed(2) + "%",
       num: (v, d=2) => Number(v || 0).toFixed(d),
       int: v => Math.round(Number(v || 0)).toLocaleString(),
     };
@@ -520,7 +523,17 @@
       $("pnlSub").textContent = `账户权益 ${fmt.usd(p.current_capital)} · 已实现 ${p.total_pnl >= 0 ? "+" : ""}${fmt.usd(p.total_pnl)} · 未实现 ${fmt.usd(p.unrealized_pnl)}`;
       $("fills").textContent = fmt.int(e.orders_filled_total);
       $("winRate").textContent = fmt.pct(t.win_rate);
-      $("edge").textContent = (f.ml_edge_score >= 0 ? "+" : "") + fmt.pct((f.ml_edge_score || 0) * 100);
+      const predictionEdge = live.prediction_edge || {};
+      if (predictionEdge.available && Number.isFinite(Number(predictionEdge.edge_pct))) {
+        const predictionValue = Number(predictionEdge.edge_pct);
+        $("edge").textContent = `${predictionValue >= 0 ? "+" : ""}${fmt.pct(predictionValue)}`;
+        $("edge").className = "v " + (predictionValue > 0 ? "green" : predictionValue < 0 ? "red" : "yellow");
+        $("edge").title = `${predictionEdge.direction || "-"} · 模型胜率 ${fmt.pct(Number(predictionEdge.held_probability || 0) * 100)} · 可成交价 ${fmt.num(predictionEdge.executable_entry_price, 4)} · 未扣费`;
+      } else {
+        $("edge").textContent = "—";
+        $("edge").className = "v yellow";
+        $("edge").title = predictionEdge.reason || "尚无通过风控的交易信号";
+      }
       $("ddRisk").textContent = `${fmt.num(Math.min(10, (r.max_drawdown || 0) / 10), 1)}/10`;
       $("ddBar").style.width = Math.max(0, Math.min(100, r.max_drawdown || 0)) + "%";
       $("openSummary").textContent = `${fmt.usd(p.unrealized_pnl)} / ${fmt.usd(e.total_exposure)}`;
@@ -567,7 +580,16 @@
       $("arbLocked").textContent = live.trade_window_open ? "开" : "关";
       $("effStale").textContent = fmt.int((s.processors?.CVDOrderBook?.fires_total || 0) + (s.processors?.OrderBookImbalance?.fires_total || 0));
       $("effFav").textContent = fmt.num(f.fusion_score || 0, 1);
-      $("effFill").textContent = fmt.pct(e.orders_placed_total ? (e.orders_filled_total / e.orders_placed_total) * 100 : 0);
+      const entryFillRateRaw = e.entry_fill_rate_pct;
+      const entryFillRate = entryFillRateRaw === null || entryFillRateRaw === undefined
+        ? Number.NaN
+        : Number(entryFillRateRaw);
+      $("effFill").textContent = Number.isFinite(entryFillRate)
+        ? `${fmt.pct(entryFillRate)} · ${fmt.int(e.entry_orders_filled_total)}/${fmt.int(e.entry_orders_submitted_total)}`
+        : "— · 0笔";
+      $("effFill").title = e.order_stats_since
+        ? `自 ${String(e.order_stats_since).replace("T", " ").slice(0, 19)} 起统计；完整成交率 ${fmt.pctOrDash(e.entry_full_fill_rate_pct)}；金额成交率 ${fmt.pctOrDash(e.entry_notional_fill_rate_pct)}`
+        : "暂无升级后的入场订单样本";
       $("effLoss").textContent = fmt.pct(e.trades_closed_total ? (e.losing_trades_total / e.trades_closed_total) * 100 : 0);
       $("positionBuilt").textContent = e.open_positions > 0 ? "已构建" : "待命";
       $("redeemState").textContent = e.open_positions > 0 ? "等待结算" : "观察";
@@ -607,7 +629,17 @@
       const totalVolume = Number(live.total_volume_usd || eventVolume || 0);
       $("analyticsVolume").textContent = fmt.usd(totalVolume);
       $("analyticsWinRate").textContent = fmt.pct(t.win_rate);
-      $("analyticsEdge").textContent = fmt.pct((f.ml_edge_score || 0) * 100);
+      const strategyEdge = live.strategy_edge || {};
+      const strategyEdgeValue = Number(strategyEdge.edge_pct);
+      if (strategyEdge.available && Number.isFinite(strategyEdgeValue)) {
+        $("analyticsEdge").textContent = `${strategyEdgeValue >= 0 ? "+" : ""}${fmt.pct(strategyEdgeValue)} · ${fmt.int(strategyEdge.sample_size)}笔`;
+        $("analyticsEdge").className = strategyEdgeValue >= 0 ? "green" : "red";
+        $("analyticsEdge").title = `${strategyEdge.sample_sufficient ? "样本可用" : "样本不足30笔"} · 单笔期望 ${fmt.usd(strategyEdge.expectancy_usd)} · 未单列手续费`;
+      } else {
+        $("analyticsEdge").textContent = `— · ${fmt.int(strategyEdge.sample_size || 0)}笔`;
+        $("analyticsEdge").className = "yellow";
+        $("analyticsEdge").title = "等待已结算交易样本";
+      }
       $("footerPnl").textContent = fmt.usd(p.total_pnl);
       $("footerPnl").className = p.total_pnl >= 0 ? "green" : "red";
       $("footerAccount").textContent = `${live.mode === "live" ? "实盘" : "模拟"}账本 · ${fmt.int(live.completed_trades || 0)} 笔已平仓`;
@@ -999,9 +1031,15 @@
       const winSeries = series("trade_stats.win_rate");
       const winNow = Number(s.trade_stats?.win_rate || 0);
       if (!winSeries.length || winSeries[winSeries.length - 1] !== winNow) winSeries.push(winNow);
-      const edgeSeries = series("fusion_ml.ml_edge_score").map(value => Number(value) * 100);
-      const edgeNow = Number(s.fusion_ml?.ml_edge_score || 0) * 100;
-      if (!edgeSeries.length || edgeSeries[edgeSeries.length - 1] !== edgeNow) edgeSeries.push(edgeNow);
+      const edgeSeries = state.history
+        .map(point => point.live_state?.strategy_edge?.edge_pct)
+        .filter(value => value !== null && value !== undefined && Number.isFinite(Number(value)))
+        .map(Number);
+      const edgeNowRaw = live.strategy_edge?.edge_pct;
+      const edgeNow = edgeNowRaw === null || edgeNowRaw === undefined
+        ? Number.NaN
+        : Number(edgeNowRaw);
+      if (Number.isFinite(edgeNow) && (!edgeSeries.length || edgeSeries[edgeSeries.length - 1] !== edgeNow)) edgeSeries.push(edgeNow);
       miniChart("fillsChart", pnlSeries, pnlNow >= 0 ? "#168c55" : "#d93c4d", true);
       miniChart("analyticsPnlChart", pnlSeries, pnlNow >= 0 ? "#168c55" : "#d93c4d", true);
       miniChart("analyticsVolumeChart", volumeSeries, "#1674c9", true);

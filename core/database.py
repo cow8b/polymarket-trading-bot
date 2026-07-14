@@ -11,8 +11,10 @@ from typing import Any, Dict, Iterable, List, Optional
 from dotenv import load_dotenv
 from sqlalchemy import (
     BigInteger,
+    case,
     Column,
     Double,
+    func,
     Index,
     Integer,
     MetaData,
@@ -179,6 +181,29 @@ trade_history = Table(
     Column("payload_json", long_text, nullable=False),
     Column("updated_at", String(40), nullable=False),
     Index("idx_trade_history_timeline", "trade_type", "timestamp"),
+)
+
+order_lifecycle = Table(
+    "order_lifecycle",
+    metadata,
+    Column("mode", String(16), primary_key=True),
+    Column("order_id", String(191), primary_key=True),
+    Column("role", String(16), nullable=False),
+    Column("market_slug", String(255), nullable=False, default=""),
+    Column("direction", String(16), nullable=False, default=""),
+    Column("status", String(32), nullable=False),
+    Column("requested_usd", Double, nullable=False, default=0.0),
+    Column("requested_qty", Double, nullable=False, default=0.0),
+    Column("filled_notional_usd", Double, nullable=False, default=0.0),
+    Column("filled_qty", Double, nullable=False, default=0.0),
+    Column("fill_count", Integer, nullable=False, default=0),
+    Column("rejection_reason", Text),
+    Column("submitted_at", String(40), nullable=False),
+    Column("first_fill_at", String(40)),
+    Column("last_fill_at", String(40)),
+    Column("terminal_at", String(40)),
+    Column("updated_at", String(40), nullable=False),
+    Index("idx_order_lifecycle_stats", "mode", "role", "status", "submitted_at"),
 )
 
 dashboard_states = Table(
@@ -392,6 +417,267 @@ class TradeHistoryRepository:
                 )
             )
         return result.rowcount == 1
+
+
+class OrderLifecycleRepository:
+    """订单生命周期事实表；用于可重启恢复的执行质量统计。"""
+
+    TERMINAL_STATUSES = {"FILLED", "REJECTED", "DENIED", "CANCELED", "EXPIRED"}
+
+    def __init__(self, engine: Optional[Engine] = None):
+        self.engine = initialize_database(engine=engine)
+
+    @staticmethod
+    def _now() -> str:
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).isoformat()
+
+    def record_submitted(
+        self,
+        *,
+        mode: str,
+        order_id: str,
+        role: str,
+        market_slug: str = "",
+        direction: str = "",
+        requested_usd: float = 0.0,
+        requested_qty: float = 0.0,
+        submitted_at: Optional[str] = None,
+    ) -> None:
+        """登记一次订单提交；重复事件只补充元数据，不重置成交状态。"""
+        now = self._now()
+        row = {
+            "mode": mode,
+            "order_id": order_id,
+            "role": role,
+            "market_slug": market_slug,
+            "direction": direction,
+            "status": "SUBMITTED",
+            "requested_usd": max(0.0, float(requested_usd or 0.0)),
+            "requested_qty": max(0.0, float(requested_qty or 0.0)),
+            "filled_notional_usd": 0.0,
+            "filled_qty": 0.0,
+            "fill_count": 0,
+            "submitted_at": submitted_at or now,
+            "updated_at": now,
+        }
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                select(order_lifecycle.c.status).where(
+                    order_lifecycle.c.mode == mode,
+                    order_lifecycle.c.order_id == order_id,
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                conn.execute(insert(order_lifecycle), row)
+                return
+            conn.execute(
+                update(order_lifecycle)
+                .where(
+                    order_lifecycle.c.mode == mode,
+                    order_lifecycle.c.order_id == order_id,
+                )
+                .values(
+                    role=role,
+                    market_slug=market_slug,
+                    direction=direction,
+                    requested_usd=row["requested_usd"],
+                    requested_qty=row["requested_qty"],
+                    updated_at=now,
+                )
+            )
+
+    def record_fill(
+        self,
+        *,
+        mode: str,
+        order_id: str,
+        role: str,
+        filled_qty: float,
+        filled_notional_usd: float,
+        market_slug: str = "",
+        direction: str = "",
+    ) -> None:
+        """累加部分成交；达到请求数量或金额时标记为完整成交。"""
+        now = self._now()
+        qty_delta = max(0.0, float(filled_qty or 0.0))
+        notional_delta = max(0.0, float(filled_notional_usd or 0.0))
+        with self.engine.begin() as conn:
+            existing = conn.execute(
+                select(order_lifecycle).where(
+                    order_lifecycle.c.mode == mode,
+                    order_lifecycle.c.order_id == order_id,
+                ).with_for_update()
+            ).mappings().one_or_none()
+            if existing is None:
+                conn.execute(
+                    insert(order_lifecycle),
+                    {
+                        "mode": mode,
+                        "order_id": order_id,
+                        "role": role,
+                        "market_slug": market_slug,
+                        "direction": direction,
+                        "status": "FILLED",
+                        "requested_usd": 0.0,
+                        "requested_qty": 0.0,
+                        "filled_notional_usd": notional_delta,
+                        "filled_qty": qty_delta,
+                        "fill_count": 1,
+                        "submitted_at": now,
+                        "first_fill_at": now,
+                        "last_fill_at": now,
+                        "terminal_at": now,
+                        "updated_at": now,
+                    },
+                )
+                return
+
+            total_qty = float(existing["filled_qty"] or 0.0) + qty_delta
+            total_notional = float(existing["filled_notional_usd"] or 0.0) + notional_delta
+            requested_qty = float(existing["requested_qty"] or 0.0)
+            requested_usd = float(existing["requested_usd"] or 0.0)
+            complete = (
+                (requested_qty > 0 and total_qty >= requested_qty * 0.995)
+                or (requested_qty <= 0 and requested_usd > 0 and total_notional >= requested_usd * 0.995)
+                or (requested_qty <= 0 and requested_usd <= 0)
+            )
+            values: Dict[str, Any] = {
+                "filled_qty": total_qty,
+                "filled_notional_usd": total_notional,
+                "fill_count": int(existing["fill_count"] or 0) + 1,
+                "status": "FILLED" if complete else "PARTIAL",
+                "first_fill_at": existing["first_fill_at"] or now,
+                "last_fill_at": now,
+                "updated_at": now,
+            }
+            if complete:
+                values["terminal_at"] = now
+            conn.execute(
+                update(order_lifecycle)
+                .where(
+                    order_lifecycle.c.mode == mode,
+                    order_lifecycle.c.order_id == order_id,
+                )
+                .values(**values)
+            )
+
+    def record_terminal(
+        self,
+        *,
+        mode: str,
+        order_id: str,
+        role: str,
+        status: str,
+        reason: str = "",
+    ) -> None:
+        """登记拒绝、取消等终态；已有成交数量不会被清空。"""
+        normalized = status.strip().upper()
+        if normalized not in self.TERMINAL_STATUSES:
+            raise ValueError(f"不支持的订单终态：{status}")
+        now = self._now()
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                update(order_lifecycle)
+                .where(
+                    order_lifecycle.c.mode == mode,
+                    order_lifecycle.c.order_id == order_id,
+                )
+                .values(
+                    status=normalized,
+                    rejection_reason=reason or None,
+                    terminal_at=now,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount == 0:
+                conn.execute(
+                    insert(order_lifecycle),
+                    {
+                        "mode": mode,
+                        "order_id": order_id,
+                        "role": role,
+                        "market_slug": "",
+                        "direction": "",
+                        "status": normalized,
+                        "requested_usd": 0.0,
+                        "requested_qty": 0.0,
+                        "filled_notional_usd": 0.0,
+                        "filled_qty": 0.0,
+                        "fill_count": 0,
+                        "rejection_reason": reason or None,
+                        "submitted_at": now,
+                        "terminal_at": now,
+                        "updated_at": now,
+                    },
+                )
+
+    def stats(self, mode: str, role: str = "entry") -> Dict[str, Any]:
+        """聚合指定模式与订单角色；仅在订单事件或启动恢复时调用。"""
+        stmt = select(
+            func.count().label("submitted_total"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (
+                            (order_lifecycle.c.filled_qty > 0)
+                            | (order_lifecycle.c.filled_notional_usd > 0),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("filled_orders"),
+            func.coalesce(
+                func.sum(case((order_lifecycle.c.status == "FILLED", 1), else_=0)), 0
+            ).label("fully_filled_orders"),
+            func.coalesce(
+                func.sum(
+                    case(
+                        (order_lifecycle.c.status.in_(("REJECTED", "DENIED")), 1),
+                        else_=0,
+                    )
+                ),
+                0,
+            ).label("rejected_orders"),
+            func.coalesce(func.sum(order_lifecycle.c.requested_usd), 0.0).label(
+                "requested_notional_usd"
+            ),
+            func.coalesce(func.sum(order_lifecycle.c.filled_notional_usd), 0.0).label(
+                "filled_notional_usd"
+            ),
+            func.min(order_lifecycle.c.submitted_at).label("stats_since"),
+        ).where(
+            order_lifecycle.c.mode == mode,
+            order_lifecycle.c.role == role,
+        )
+        with self.engine.connect() as conn:
+            row = conn.execute(stmt).mappings().one()
+        submitted = int(row["submitted_total"] or 0)
+        filled = int(row["filled_orders"] or 0)
+        full = int(row["fully_filled_orders"] or 0)
+        requested = float(row["requested_notional_usd"] or 0.0)
+        filled_notional = float(row["filled_notional_usd"] or 0.0)
+        return {
+            "mode": mode,
+            "role": role,
+            "submitted_total": submitted,
+            "filled_orders": filled,
+            "fully_filled_orders": full,
+            "rejected_orders": int(row["rejected_orders"] or 0),
+            "fill_rate_pct": (filled / submitted * 100.0) if submitted else None,
+            "full_fill_rate_pct": (full / submitted * 100.0) if submitted else None,
+            "notional_fill_rate_pct": (
+                min(100.0, filled_notional / requested * 100.0)
+                if requested > 0
+                else None
+            ),
+            "requested_notional_usd": requested,
+            "filled_notional_usd": filled_notional,
+            "stats_since": row["stats_since"],
+        }
 
 
 class DashboardStateRepository:

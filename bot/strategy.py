@@ -35,7 +35,8 @@ from bot.models import (
     PaperTrade,
     _make_stub_signal,
 )
-from core.database import TradeHistoryRepository
+from core.analytics import calculate_prediction_edge, calculate_strategy_edge
+from core.database import OrderLifecycleRepository, TradeHistoryRepository
 from core.recording import get_signal_recorder
 from core.settlement import get_settlement_tracker
 from core.strategy.fusion import get_fusion_engine
@@ -372,6 +373,14 @@ class IntegratedBTCStrategy(Strategy):
         self.performance_tracker = get_performance_tracker()
         self.learning_engine = get_learning_engine()
         self.trade_history_repository = TradeHistoryRepository()
+        self.order_lifecycle_repository = OrderLifecycleRepository()
+        self._order_stats_by_mode: Dict[str, Dict[str, dict]] = {}
+        self._latest_prediction_edge: Dict[str, Any] = {
+            "available": False,
+            "reason": "尚无通过风控的交易信号",
+        }
+        for order_mode in ("paper", "live"):
+            self._refresh_order_stats(order_mode)
         self.ml_engine = get_ml_engine()
         self.settlement_tracker = get_settlement_tracker()
         # Records every decision cycle (all processor signals + fused result +
@@ -427,6 +436,88 @@ class IntegratedBTCStrategy(Strategy):
         logger.info("=" * 80)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    def _refresh_order_stats(self, mode: str) -> None:
+        """订单事件后刷新小型聚合缓存，页面轮询不直接查询数据库。"""
+        try:
+            self._order_stats_by_mode[mode] = {
+                "entry": self.order_lifecycle_repository.stats(mode, "entry"),
+                "exit": self.order_lifecycle_repository.stats(mode, "exit"),
+            }
+        except Exception as exc:
+            logger.warning(f"无法刷新 {mode} 订单统计: {exc}")
+            self._order_stats_by_mode.setdefault(mode, {"entry": {}, "exit": {}})
+
+    def _record_order_submitted(
+        self,
+        *,
+        mode: str,
+        order_id: str,
+        role: str,
+        market_slug: str,
+        direction: str,
+        requested_usd: float = 0.0,
+        requested_qty: float = 0.0,
+    ) -> None:
+        try:
+            self.order_lifecycle_repository.record_submitted(
+                mode=mode,
+                order_id=order_id,
+                role=role,
+                market_slug=market_slug,
+                direction=direction,
+                requested_usd=requested_usd,
+                requested_qty=requested_qty,
+            )
+            self._refresh_order_stats(mode)
+        except Exception as exc:
+            logger.warning(f"无法记录订单提交 {order_id}: {exc}")
+
+    def _record_order_fill(
+        self,
+        *,
+        mode: str,
+        order_id: str,
+        role: str,
+        market_slug: str,
+        direction: str,
+        filled_qty: float,
+        filled_notional_usd: float,
+    ) -> None:
+        try:
+            self.order_lifecycle_repository.record_fill(
+                mode=mode,
+                order_id=order_id,
+                role=role,
+                market_slug=market_slug,
+                direction=direction,
+                filled_qty=filled_qty,
+                filled_notional_usd=filled_notional_usd,
+            )
+            self._refresh_order_stats(mode)
+        except Exception as exc:
+            logger.warning(f"无法记录订单成交 {order_id}: {exc}")
+
+    def _record_order_terminal(
+        self,
+        *,
+        mode: str,
+        order_id: str,
+        role: str,
+        status: str,
+        reason: str = "",
+    ) -> None:
+        try:
+            self.order_lifecycle_repository.record_terminal(
+                mode=mode,
+                order_id=order_id,
+                role=role,
+                status=status,
+                reason=reason,
+            )
+            self._refresh_order_stats(mode)
+        except Exception as exc:
+            logger.warning(f"无法记录订单终态 {order_id}: {exc}")
 
     def _load_trade_history(self) -> None:
         """从 MySQL 恢复交易，用于累计统计和重启后复盘。
@@ -1509,6 +1600,7 @@ class IntegratedBTCStrategy(Strategy):
         wins = sum(1 for t in settled if t.outcome == "WIN")
         win_rate = (wins / len(settled) * 100) if settled else 0.0
         total_pnl = sum(float(t.pnl_usd) for t in all_trades)
+        strategy_edge = calculate_strategy_edge(all_trades, window=50)
         total_volume_usd = sum(
             float(t.size_usd)
             + (
@@ -1587,6 +1679,14 @@ class IntegratedBTCStrategy(Strategy):
             "win_rate": win_rate,
             "total_pnl": total_pnl,
             "total_volume_usd": total_volume_usd,
+            "prediction_edge": dict(self._latest_prediction_edge),
+            "strategy_edge": strategy_edge,
+            "order_stats": dict(
+                self._order_stats_by_mode.get(
+                    "paper" if self.current_simulation_mode else "live",
+                    {"entry": {}, "exit": {}},
+                )
+            ),
             "unrealized_pnl": unrealized_pnl,
             "starting_balance": starting_balance,
             "wallet_balance": wallet_balance,
@@ -1741,15 +1841,31 @@ class IntegratedBTCStrategy(Strategy):
         fused,
     ) -> None:
         """Push pre-submit order details to Prometheus for Grafana."""
-        if not self.grafana_exporter:
-            return
         try:
             held = max(0.01, min(0.99, held_entry_price))
-            qty = float(size_usd) / held if held > 0 else 0.0
             bid = ask = None
             if self._last_bid_ask:
                 bid = float(self._last_bid_ask[0])
                 ask = float(self._last_bid_ask[1])
+                executable = ask if direction == "long" else 1.0 - bid
+                held = max(0.01, min(0.99, executable))
+            qty = float(size_usd) / held if held > 0 else 0.0
+            prediction_edge = calculate_prediction_edge(
+                direction=direction,
+                p_up=ml_p_up,
+                executable_entry_price=held,
+            )
+            prediction_edge.update(
+                {
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "market_slug": market_slug,
+                    "mode": "paper" if is_simulation else "live",
+                }
+            )
+            with self._dashboard_lock:
+                self._latest_prediction_edge = prediction_edge
+            if not self.grafana_exporter:
+                return
             secs_to_settle = None
             if 0 <= self.current_instrument_index < len(self.all_btc_instruments):
                 end_ts = self.all_btc_instruments[self.current_instrument_index].get(
@@ -3026,6 +3142,24 @@ class IntegratedBTCStrategy(Strategy):
             session_trade_num=session_num,
         )
         self.paper_trades.append(paper_trade)
+        self._record_order_submitted(
+            mode="paper",
+            order_id=trade_id,
+            role="entry",
+            market_slug=slug,
+            direction=direction,
+            requested_usd=size_usd,
+            requested_qty=fill_qty,
+        )
+        self._record_order_fill(
+            mode="paper",
+            order_id=trade_id,
+            role="entry",
+            market_slug=slug,
+            direction=direction,
+            filled_qty=fill_qty,
+            filled_notional_usd=size_usd,
+        )
 
         try:
             self.risk_engine.add_position(
@@ -3309,6 +3443,26 @@ class IntegratedBTCStrategy(Strategy):
         }
         close_reason = reason_map.get(reason, "EXIT_MANUAL")
 
+        exit_id = f"PAPER-EXIT-{entry_id}-{int(time.time() * 1000)}"
+        qty_float = float(position.get("filled_qty", 0.0) or 0.0)
+        self._record_order_submitted(
+            mode="paper",
+            order_id=exit_id,
+            role="exit",
+            market_slug=str(position.get("market_slug", "")),
+            direction=str(position.get("direction", "")),
+            requested_qty=qty_float,
+        )
+        self._record_order_fill(
+            mode="paper",
+            order_id=exit_id,
+            role="exit",
+            market_slug=str(position.get("market_slug", "")),
+            direction=str(position.get("direction", "")),
+            filled_qty=qty_float,
+            filled_notional_usd=qty_float * float(exit_price),
+        )
+
         self._open_positions.pop(entry_id, None)
         self._close_paper_position(entry_id, position, exit_price, close_reason)
 
@@ -3418,6 +3572,14 @@ class IntegratedBTCStrategy(Strategy):
             )
 
             self.submit_order(order)
+            self._record_order_submitted(
+                mode="live",
+                order_id=unique_id,
+                role="entry",
+                market_slug=market_slug,
+                direction=direction,
+                requested_usd=max_usd_amount,
+            )
             self._track_order_event("placed")
             if self.grafana_exporter:
                 self.grafana_exporter.record_dashboard_event(
@@ -3658,6 +3820,15 @@ class IntegratedBTCStrategy(Strategy):
                 pass
 
         notional = float(fill_price) * float(fill_qty)
+        self._record_order_fill(
+            mode="live",
+            order_id=client_id,
+            role="exit" if is_exit else "entry",
+            market_slug=str(event_meta.get("market_slug", "")),
+            direction=str(event_meta.get("direction", "")),
+            filled_qty=float(fill_qty),
+            filled_notional_usd=notional,
+        )
 
         self._log_event_banner(
             level="success" if not is_exit else "info",
@@ -4149,6 +4320,13 @@ class IntegratedBTCStrategy(Strategy):
     def on_order_denied(self, event) -> None:
         client_id = str(getattr(event, "client_order_id", "?"))
         reason = str(getattr(event, "reason", "(unknown)"))
+        self._record_order_terminal(
+            mode="live",
+            order_id=client_id,
+            role="exit" if client_id in self._pending_exits else "entry",
+            status="DENIED",
+            reason=reason,
+        )
         tui_event("REJECT", reason[:72], slug="S5", level="ERROR", activity=True)
         self._log_event_banner(
             level="error",
@@ -4166,6 +4344,13 @@ class IntegratedBTCStrategy(Strategy):
     def on_order_rejected(self, event) -> None:
         client_id = str(getattr(event, "client_order_id", "?"))
         reason = str(getattr(event, "reason", ""))
+        self._record_order_terminal(
+            mode="live",
+            order_id=client_id,
+            role="exit" if client_id in self._pending_exits else "entry",
+            status="REJECTED",
+            reason=reason,
+        )
         tui_event("REJECT", (reason or "Order rejected")[:72], slug="S5", level="ERROR", activity=True)
         is_fak = any(
             kw in reason.lower() for kw in ("no orders found", "fak", "no match")
@@ -4187,6 +4372,30 @@ class IntegratedBTCStrategy(Strategy):
             ],
         )
         self._track_order_event("rejected")
+        self._discard_pending_order(event)
+
+    def on_order_canceled(self, event) -> None:
+        """记录 IOC 未成交或部分成交后的取消终态。"""
+        client_id = str(getattr(event, "client_order_id", "?"))
+        self._record_order_terminal(
+            mode="live",
+            order_id=client_id,
+            role="exit" if client_id in self._pending_exits else "entry",
+            status="CANCELED",
+            reason=str(getattr(event, "reason", "") or ""),
+        )
+        self._discard_pending_order(event)
+
+    def on_order_expired(self, event) -> None:
+        """记录订单过期终态并释放待处理状态。"""
+        client_id = str(getattr(event, "client_order_id", "?"))
+        self._record_order_terminal(
+            mode="live",
+            order_id=client_id,
+            role="exit" if client_id in self._pending_exits else "entry",
+            status="EXPIRED",
+            reason=str(getattr(event, "reason", "") or ""),
+        )
         self._discard_pending_order(event)
 
     def _discard_pending_order(self, event) -> None:
@@ -4341,6 +4550,14 @@ class IntegratedBTCStrategy(Strategy):
         position["exit_in_flight"] = True
         position["exit_order_id"] = exit_id
         self._pending_exits[exit_id] = entry_id
+        self._record_order_submitted(
+            mode="live",
+            order_id=exit_id,
+            role="exit",
+            market_slug=str(position.get("market_slug", "")),
+            direction=str(position.get("direction", "")),
+            requested_qty=qty_float,
+        )
 
         # Compute current unrealised P&L for the banner.
         entry_px_f = float(

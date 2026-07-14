@@ -181,6 +181,11 @@ to wait at least five minutes after market end.
 
 - Metrics exporters and helpers live under `monitoring/`.
 - Grafana dashboard assets live under `grafana/` (import with `grafana/import_dashboard.py`).
+- **Current prediction edge** compares the held-outcome probability with the latest executable entry price; fees and extra slippage are not included.
+- **Entry fill rate** is entry orders with any fill divided by submitted entry orders. Paper/live and entry/exit orders are persisted separately in MySQL `order_lifecycle`.
+- **Rolling strategy return** is realised PnL divided by entry notional over the latest 50 settled trades; fewer than 30 trades is marked as an insufficient sample.
+
+With no post-upgrade order samples, the fill rate displays `—` rather than a fabricated zero or historical estimate.
 
 Wire these to your own Prometheus/Grafana stack as needed.
 

@@ -13,6 +13,7 @@ from core.database import (
     DashboardStateRepository,
     DatabaseConfigurationError,
     DatabaseSettings,
+    OrderLifecycleRepository,
     TradeHistoryRepository,
     metadata,
 )
@@ -137,6 +138,103 @@ class RepositoryTests(unittest.TestCase):
             [row["trade_id"] for row in repository.load_pending("paper")],
             ["pending"],
         )
+
+    def test_order_lifecycle_tracks_partial_and_full_fill(self) -> None:
+        repository = OrderLifecycleRepository(self.engine)
+        repository.record_submitted(
+            mode="live",
+            order_id="entry-1",
+            role="entry",
+            requested_usd=10.0,
+        )
+        repository.record_fill(
+            mode="live",
+            order_id="entry-1",
+            role="entry",
+            filled_qty=10.0,
+            filled_notional_usd=5.0,
+        )
+        partial = repository.stats("live", "entry")
+        self.assertEqual(partial["filled_orders"], 1)
+        self.assertEqual(partial["fully_filled_orders"], 0)
+        self.assertEqual(partial["fill_rate_pct"], 100.0)
+        self.assertEqual(partial["notional_fill_rate_pct"], 50.0)
+
+        repository.record_fill(
+            mode="live",
+            order_id="entry-1",
+            role="entry",
+            filled_qty=10.0,
+            filled_notional_usd=5.0,
+        )
+        complete = OrderLifecycleRepository(self.engine).stats("live", "entry")
+        self.assertEqual(complete["fully_filled_orders"], 1)
+        self.assertEqual(complete["full_fill_rate_pct"], 100.0)
+        self.assertEqual(complete["notional_fill_rate_pct"], 100.0)
+
+    def test_order_stats_isolate_mode_role_and_rejections(self) -> None:
+        repository = OrderLifecycleRepository(self.engine)
+        repository.record_submitted(
+            mode="live", order_id="entry-1", role="entry", requested_usd=10.0
+        )
+        repository.record_terminal(
+            mode="live",
+            order_id="entry-1",
+            role="entry",
+            status="REJECTED",
+            reason="no liquidity",
+        )
+        repository.record_submitted(
+            mode="live", order_id="exit-1", role="exit", requested_qty=20.0
+        )
+        repository.record_fill(
+            mode="live",
+            order_id="exit-1",
+            role="exit",
+            filled_qty=20.0,
+            filled_notional_usd=8.0,
+        )
+        repository.record_submitted(
+            mode="paper", order_id="paper-1", role="entry", requested_usd=10.0
+        )
+        repository.record_fill(
+            mode="paper",
+            order_id="paper-1",
+            role="entry",
+            filled_qty=20.0,
+            filled_notional_usd=10.0,
+        )
+
+        live_entry = repository.stats("live", "entry")
+        self.assertEqual(live_entry["submitted_total"], 1)
+        self.assertEqual(live_entry["filled_orders"], 0)
+        self.assertEqual(live_entry["rejected_orders"], 1)
+        self.assertEqual(repository.stats("live", "exit")["filled_orders"], 1)
+        self.assertEqual(repository.stats("paper", "entry")["filled_orders"], 1)
+
+    def test_partial_fill_remains_a_fill_after_cancel(self) -> None:
+        repository = OrderLifecycleRepository(self.engine)
+        repository.record_submitted(
+            mode="live", order_id="partial", role="entry", requested_usd=10.0
+        )
+        repository.record_fill(
+            mode="live",
+            order_id="partial",
+            role="entry",
+            filled_qty=5.0,
+            filled_notional_usd=2.0,
+        )
+        repository.record_terminal(
+            mode="live",
+            order_id="partial",
+            role="entry",
+            status="CANCELED",
+        )
+        stats = repository.stats("live", "entry")
+        self.assertEqual(stats["filled_orders"], 1)
+        self.assertEqual(stats["fully_filled_orders"], 0)
+        self.assertEqual(stats["fill_rate_pct"], 100.0)
+        self.assertEqual(stats["notional_fill_rate_pct"], 20.0)
 
     def test_dashboard_state_round_trip(self) -> None:
         repository = DashboardStateRepository(self.engine)

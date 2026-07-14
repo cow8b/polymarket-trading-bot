@@ -236,6 +236,12 @@ python scripts/reconcile_trades.py --apply --mode paper --older-than 5
 
 - 指标导出与辅助工具位于 `monitoring/`。
 - Grafana 仪表板资源位于 `infra/grafana/`（使用 `infra/grafana/import_dashboard.py` 导入）。
+- **当前预测优势**：最近一笔通过风控的信号，按持有结果概率与可成交入场价计算，未扣手续费和额外滑点。
+- **入场成交率**：升级后有成交的入场订单数 ÷ 已提交入场订单数；模拟/实盘及入场/退出分别落入 MySQL `order_lifecycle` 表。
+- **近 50 笔策略收益率**：最近 50 笔已结算盈亏 ÷ 对应入场本金；少于 30 笔时页面标记为样本不足。
+
+没有订单样本时成交率显示 `—`，不会使用历史成交笔数伪造 `0%` 或
+`100%`。当前交易账本未单列手续费，因此优势指标会明确标注“未扣费”。
 
 按需接入你自己的 Prometheus/Grafana 栈。
 
