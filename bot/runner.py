@@ -93,7 +93,9 @@ def init_redis():
             db=int(os.getenv("REDIS_DB", 2)),
             decode_responses=True,
             socket_connect_timeout=5,
+            socket_timeout=2,
             socket_keepalive=True,
+            health_check_interval=30,
         )
         client.ping()
         logger.info("Redis connection established")

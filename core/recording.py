@@ -66,9 +66,32 @@ class SignalRecorder:
         self._price_fn = price_fn
         self.engine = initialize_database(engine=engine)
         self._lock = threading.Lock()
+        self._stats_lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._stop_event = threading.Event()
+        self._total_cycles = 0
+        self._pending_cycles = 0
+        self._resolved_cycles = 0
+        self._refresh_stats_from_db()
+
+    def _refresh_stats_from_db(self) -> None:
+        """启动时从 MySQL 初始化一次计数，运行期间由写入路径维护。"""
+        with self.engine.connect() as conn:
+            total, resolved = conn.execute(
+                select(
+                    func.count(),
+                    func.count(signal_cycles.c.outcome),
+                ).select_from(signal_cycles)
+            ).one()
+        with self._stats_lock:
+            self._total_cycles = int(total or 0)
+            self._resolved_cycles = int(resolved or 0)
+            self._pending_cycles = self._total_cycles - self._resolved_cycles
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
 
     def start(self) -> None:
         if self._running:
@@ -121,6 +144,9 @@ class SignalRecorder:
         with self._lock:
             with self.engine.begin() as conn:
                 conn.execute(insert(signal_cycles), payload)
+            with self._stats_lock:
+                self._total_cycles += 1
+                self._pending_cycles += 1
 
     def _resolve_loop(self) -> None:
         while self._running:
@@ -133,6 +159,9 @@ class SignalRecorder:
     def _resolve_pending(self) -> None:
         if self._price_fn is None:
             return
+        with self._stats_lock:
+            if self._pending_cycles <= 0:
+                return
 
         now = time.time()
         exit_price = self._price_fn()
@@ -140,6 +169,7 @@ class SignalRecorder:
             return
 
         with self._lock:
+            resolved_cycle_count = 0
             with self.engine.begin() as conn:
                 rows = conn.execute(
                     select(
@@ -183,7 +213,7 @@ class SignalRecorder:
                     outcome = 1 if exit_price > entry_price else 0
                     resolved_at = datetime.now(timezone.utc).isoformat()
 
-                    conn.execute(
+                    result = conn.execute(
                         update(signal_cycles)
                         .where(and_(*market_match), signal_cycles.c.outcome.is_(None))
                         .values(
@@ -193,26 +223,30 @@ class SignalRecorder:
                             resolved_at=resolved_at,
                         )
                     )
+                    if result.rowcount:
+                        resolved_cycle_count += result.rowcount
 
-                if rows:
-                    logger.info(
-                        f"SignalRecorder resolved {len(rows)} market(s) "
-                        f"(exit={exit_price:.2f})"
+            # 事务成功提交后再更新缓存，避免数据库回滚时内存计数提前变化。
+            if resolved_cycle_count:
+                with self._stats_lock:
+                    self._pending_cycles = max(
+                        0, self._pending_cycles - resolved_cycle_count
                     )
+                    self._resolved_cycles += resolved_cycle_count
+            if rows:
+                logger.info(
+                    f"SignalRecorder resolved {len(rows)} market(s) "
+                    f"(exit={exit_price:.2f})"
+                )
 
-    def get_stats(self) -> Dict[str, Any]:
-        with self.engine.connect() as conn:
-            total = conn.execute(select(func.count()).select_from(signal_cycles)).scalar_one()
-            pending = conn.execute(
-                select(func.count()).select_from(signal_cycles).where(
-                    signal_cycles.c.outcome.is_(None)
-                )
-            ).scalar_one()
-            resolved = conn.execute(
-                select(func.count()).select_from(signal_cycles).where(
-                    signal_cycles.c.outcome.is_not(None)
-                )
-            ).scalar_one()
+    def get_stats(self, *, refresh: bool = False) -> Dict[str, Any]:
+        """返回内存计数；诊断场景可显式 refresh=True 与数据库重新同步。"""
+        if refresh:
+            self._refresh_stats_from_db()
+        with self._stats_lock:
+            total = self._total_cycles
+            pending = self._pending_cycles
+            resolved = self._resolved_cycles
         return {
             "storage": "mysql",
             "total_cycles": total,

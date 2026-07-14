@@ -110,6 +110,7 @@ DB_DATABASE=poly_bot
 DB_AUTO_CREATE_TABLES=true
 
 REDIS_HOST=localhost
+REDIS_PASSWORD=your_redis_password
 REDIS_PORT=6379
 REDIS_DB=2
 
@@ -188,6 +189,15 @@ python supervisor.py --live
 ```bash
 python scripts/view_trades.py
 ```
+
+---
+
+## 数据存储与缓存
+
+- **MySQL 是唯一事实来源**：成交、信号、ML 样本和驾驶舱复盘数据必须先成功落库。
+- **进程内缓存承接热状态**：运行状态、信号计数和数据库增量水位由单机器人进程维护，避免高频统计查询。
+- **Redis 仅作为控制面**：当前用于模拟/实盘模式切换，不缓存资金、持仓或收益，避免双写不一致。
+- 正常运行请保持 `DB_ECHO=false`；仅排查 SQL 时临时开启。
 
 ---
 

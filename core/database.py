@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -23,6 +24,7 @@ from sqlalchemy import (
     inspect,
     insert,
     select,
+    update,
 )
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.engine import Engine, URL
@@ -120,11 +122,12 @@ class DatabaseSettings:
 
 metadata = MetaData()
 long_text = Text().with_variant(LONGTEXT(), "mysql")
+bigint_primary_key = BigInteger().with_variant(Integer, "sqlite")
 
 signal_cycles = Table(
     "signal_cycles",
     metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("id", bigint_primary_key, primary_key=True, autoincrement=True),
     Column("recorded_at", String(40), nullable=False),
     Column("market_slug", String(255), nullable=False),
     Column("market_start_ts", Double),
@@ -154,7 +157,7 @@ ML_FEATURE_NAMES = [
 ml_feature_trades = Table(
     "ml_feature_trades",
     metadata,
-    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("id", bigint_primary_key, primary_key=True, autoincrement=True),
     Column("timestamp", String(40), nullable=False),
     Column("market_slug", String(255)),
     Column("poly_price", Double, nullable=False),
@@ -196,7 +199,7 @@ dashboard_history = Table(
 dashboard_events = Table(
     "dashboard_events",
     metadata,
-    Column("sequence", BigInteger, primary_key=True),
+    Column("sequence", bigint_primary_key, primary_key=True),
     Column("event_ts", String(40), nullable=False),
     Column("payload_json", long_text, nullable=False),
     Index("idx_dashboard_events_ts", "event_ts"),
@@ -205,6 +208,7 @@ dashboard_events = Table(
 
 _engine: Optional[Engine] = None
 _engine_lock = threading.Lock()
+_schema_ready = False
 
 
 def get_database_engine() -> Engine:
@@ -230,6 +234,10 @@ def get_database_engine() -> Engine:
 
 def initialize_database(*, force: bool = False, engine: Optional[Engine] = None) -> Engine:
     """检查表结构；显式 force 或配置允许时创建缺失表。"""
+    global _schema_ready
+    if engine is None and _schema_ready and not force:
+        return get_database_engine()
+
     settings = DatabaseSettings.from_env() if engine is None else None
     # 建库属于部署动作，仅显式迁移命令（force=True）执行；机器人启动只建表。
     if settings is not None and force:
@@ -260,16 +268,19 @@ def initialize_database(*, force: bool = False, engine: Optional[Engine] = None)
             + ", ".join(missing)
             + "；请先运行 python scripts/migrate_to_mysql.py"
         )
+    if engine is None:
+        _schema_ready = True
     return db_engine
 
 
 def dispose_database_engine() -> None:
     """测试或停机时释放连接池。"""
-    global _engine
+    global _engine, _schema_ready
     with _engine_lock:
         if _engine is not None:
             _engine.dispose()
             _engine = None
+        _schema_ready = False
 
 
 class TradeHistoryRepository:
@@ -288,7 +299,10 @@ class TradeHistoryRepository:
             payloads = conn.execute(stmt).scalars().all()
         return [json.loads(payload) for payload in payloads]
 
-    def replace(self, trade_type: str, trades: Iterable[Dict[str, Any]]) -> int:
+    @staticmethod
+    def _serialize_rows(
+        trade_type: str, trades: Iterable[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
         from datetime import datetime, timezone
 
         now = datetime.now(timezone.utc).isoformat()
@@ -307,10 +321,36 @@ class TradeHistoryRepository:
                     "updated_at": now,
                 }
             )
+        return rows
+
+    def replace(self, trade_type: str, trades: Iterable[Dict[str, Any]]) -> int:
+        rows = self._serialize_rows(trade_type, trades)
         with self.engine.begin() as conn:
             conn.execute(delete(trade_history).where(trade_history.c.trade_type == trade_type))
             if rows:
                 conn.execute(insert(trade_history), rows)
+        return len(rows)
+
+    def upsert(self, trade_type: str, trades: Iterable[Dict[str, Any]]) -> int:
+        """仅写入新增或变化的交易，避免交易越多时反复重写整张表。"""
+        rows = self._serialize_rows(trade_type, trades)
+        with self.engine.begin() as conn:
+            for row in rows:
+                result = conn.execute(
+                    update(trade_history)
+                    .where(
+                        trade_history.c.trade_type == row["trade_type"],
+                        trade_history.c.trade_id == row["trade_id"],
+                    )
+                    .values(
+                        timestamp=row["timestamp"],
+                        outcome=row["outcome"],
+                        payload_json=row["payload_json"],
+                        updated_at=row["updated_at"],
+                    )
+                )
+                if result.rowcount == 0:
+                    conn.execute(insert(trade_history), row)
         return len(rows)
 
 
@@ -326,6 +366,9 @@ class DashboardStateRepository:
         self.engine = initialize_database(engine=engine)
         self.history_limit = max(1, history_limit)
         self.event_limit = max(1, event_limit)
+        self._last_history_ts: Optional[str] = None
+        self._last_event_sequence: Optional[int] = None
+        self._last_pruned_at = 0.0
 
     def load(self, state_key: str = "main") -> Optional[Dict[str, Any]]:
         stmt = select(dashboard_states.c.payload_json).where(
@@ -347,14 +390,19 @@ class DashboardStateRepository:
         state = json.loads(payload) if payload else {}
         if history_payloads:
             state["history"] = [json.loads(item) for item in reversed(history_payloads)]
+            self._last_history_ts = str(state["history"][-1].get("ts") or "") or None
         if event_payloads:
             state["events"] = [json.loads(item) for item in reversed(event_payloads)]
+            try:
+                self._last_event_sequence = max(
+                    int(item.get("sequence", 0) or 0) for item in state["events"]
+                )
+            except (TypeError, ValueError):
+                self._last_event_sequence = None
         return state or None
 
     def save(self, payload: Dict[str, Any], state_key: str = "main") -> None:
         from datetime import datetime, timezone
-        from sqlalchemy import func
-
         history = [item for item in payload.get("history", []) if isinstance(item, dict)]
         events = [item for item in payload.get("events", []) if isinstance(item, dict)]
         state_payload = dict(payload)
@@ -369,14 +417,22 @@ class DashboardStateRepository:
             ),
             "updated_at": now,
         }
+        next_history_ts: Optional[str] = None
+        next_event_sequence: Optional[int] = None
+        pruned_at: Optional[float] = None
         with self.engine.begin() as conn:
-            last_history_ts = conn.execute(
-                select(func.max(dashboard_history.c.sample_ts))
-            ).scalar_one_or_none()
+            if self._last_history_ts is None:
+                from sqlalchemy import func
+
+                self._last_history_ts = conn.execute(
+                    select(func.max(dashboard_history.c.sample_ts))
+                ).scalar_one_or_none()
             new_history = []
             for item in history:
                 sample_ts = str(item.get("ts") or "")
-                if sample_ts and (last_history_ts is None or sample_ts > last_history_ts):
+                if sample_ts and (
+                    self._last_history_ts is None or sample_ts > self._last_history_ts
+                ):
                     new_history.append(
                         {
                             "sample_ts": sample_ts,
@@ -387,10 +443,14 @@ class DashboardStateRepository:
                     )
             if new_history:
                 conn.execute(insert(dashboard_history), new_history)
+                next_history_ts = new_history[-1]["sample_ts"]
 
-            last_event_sequence = conn.execute(
-                select(func.max(dashboard_events.c.sequence))
-            ).scalar_one_or_none()
+            if self._last_event_sequence is None:
+                from sqlalchemy import func
+
+                self._last_event_sequence = conn.execute(
+                    select(func.max(dashboard_events.c.sequence))
+                ).scalar_one_or_none()
             new_events = []
             for item in events:
                 try:
@@ -398,8 +458,11 @@ class DashboardStateRepository:
                 except (TypeError, ValueError):
                     sequence = 0
                 if sequence <= 0:
-                    sequence = int(last_event_sequence or 0) + len(new_events) + 1
-                if last_event_sequence is not None and sequence <= last_event_sequence:
+                    sequence = int(self._last_event_sequence or 0) + len(new_events) + 1
+                if (
+                    self._last_event_sequence is not None
+                    and sequence <= self._last_event_sequence
+                ):
                     continue
                 new_events.append(
                     {
@@ -412,32 +475,53 @@ class DashboardStateRepository:
                 )
             if new_events:
                 conn.execute(insert(dashboard_events), new_events)
+                next_event_sequence = new_events[-1]["sequence"]
 
-            conn.execute(delete(dashboard_states).where(dashboard_states.c.state_key == state_key))
-            conn.execute(insert(dashboard_states), row)
-
-            history_cutoff = conn.execute(
-                select(dashboard_history.c.sample_ts)
-                .order_by(dashboard_history.c.sample_ts.desc())
-                .offset(self.history_limit - 1)
-                .limit(1)
-            ).scalar_one_or_none()
-            if history_cutoff is not None:
-                conn.execute(
-                    delete(dashboard_history).where(
-                        dashboard_history.c.sample_ts < history_cutoff
-                    )
+            result = conn.execute(
+                update(dashboard_states)
+                .where(dashboard_states.c.state_key == state_key)
+                .values(
+                    payload_json=row["payload_json"],
+                    updated_at=row["updated_at"],
                 )
+            )
+            if result.rowcount == 0:
+                conn.execute(insert(dashboard_states), row)
 
-            event_cutoff = conn.execute(
-                select(dashboard_events.c.sequence)
-                .order_by(dashboard_events.c.sequence.desc())
-                .offset(self.event_limit - 1)
-                .limit(1)
-            ).scalar_one_or_none()
-            if event_cutoff is not None:
-                conn.execute(
-                    delete(dashboard_events).where(
-                        dashboard_events.c.sequence < event_cutoff
+            # 裁剪不是实时语义，每分钟执行一次即可，避免每 5 秒做两次边界查询。
+            now_monotonic = time.monotonic()
+            if now_monotonic - self._last_pruned_at >= 60.0:
+                history_cutoff = conn.execute(
+                    select(dashboard_history.c.sample_ts)
+                    .order_by(dashboard_history.c.sample_ts.desc())
+                    .offset(self.history_limit - 1)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if history_cutoff is not None:
+                    conn.execute(
+                        delete(dashboard_history).where(
+                            dashboard_history.c.sample_ts < history_cutoff
+                        )
                     )
-                )
+
+                event_cutoff = conn.execute(
+                    select(dashboard_events.c.sequence)
+                    .order_by(dashboard_events.c.sequence.desc())
+                    .offset(self.event_limit - 1)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if event_cutoff is not None:
+                    conn.execute(
+                        delete(dashboard_events).where(
+                            dashboard_events.c.sequence < event_cutoff
+                        )
+                    )
+                pruned_at = now_monotonic
+
+        # 事务提交成功后才推进水位，失败时下一轮仍会重试相同增量。
+        if next_history_ts is not None:
+            self._last_history_ts = next_history_ts
+        if next_event_sequence is not None:
+            self._last_event_sequence = next_event_sequence
+        if pruned_at is not None:
+            self._last_pruned_at = pruned_at

@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
+import time
 import unittest
 from unittest.mock import patch
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.pool import StaticPool
 
 from core.database import (
@@ -15,6 +16,7 @@ from core.database import (
     TradeHistoryRepository,
     metadata,
 )
+from core.recording import SignalRecorder
 
 
 class DatabaseSettingsTests(unittest.TestCase):
@@ -68,11 +70,99 @@ class RepositoryTests(unittest.TestCase):
         repository.replace("paper", [])
         self.assertEqual(repository.load("paper"), [])
 
+    def test_trade_history_upsert_only_updates_target_trade(self) -> None:
+        repository = TradeHistoryRepository(self.engine)
+        repository.replace(
+            "paper",
+            [
+                {
+                    "trade_id": "paper_1",
+                    "timestamp": "2026-07-14T10:00:00+00:00",
+                    "outcome": "PENDING",
+                },
+                {
+                    "trade_id": "paper_2",
+                    "timestamp": "2026-07-14T10:01:00+00:00",
+                    "outcome": "PENDING",
+                },
+            ],
+        )
+        repository.upsert(
+            "paper",
+            [
+                {
+                    "trade_id": "paper_2",
+                    "timestamp": "2026-07-14T10:01:00+00:00",
+                    "outcome": "WIN",
+                }
+            ],
+        )
+        trades = repository.load("paper")
+        self.assertEqual(len(trades), 2)
+        self.assertEqual(trades[0]["outcome"], "PENDING")
+        self.assertEqual(trades[1]["outcome"], "WIN")
+
     def test_dashboard_state_round_trip(self) -> None:
         repository = DashboardStateRepository(self.engine)
         state = {"history": [{"ts": "now"}], "events": [{"type": "BUY"}]}
         repository.save(state)
         self.assertEqual(repository.load(), state)
+
+    def test_signal_recorder_stats_do_not_query_database_repeatedly(self) -> None:
+        recorder = SignalRecorder(engine=self.engine)
+        statements = []
+
+        def capture_statement(*args) -> None:
+            statements.append(str(args[2]))
+
+        event.listen(self.engine, "before_cursor_execute", capture_statement)
+        try:
+            for _ in range(10):
+                recorder.get_stats()
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture_statement)
+
+        self.assertEqual(statements, [])
+
+    def test_signal_recorder_skips_resolution_query_without_pending_rows(self) -> None:
+        price_calls = []
+        recorder = SignalRecorder(
+            engine=self.engine,
+            price_fn=lambda: price_calls.append(True) or 100_000.0,
+        )
+        statements = []
+
+        def capture_statement(*args) -> None:
+            statements.append(str(args[2]))
+
+        event.listen(self.engine, "before_cursor_execute", capture_statement)
+        try:
+            recorder._resolve_pending()
+        finally:
+            event.remove(self.engine, "before_cursor_execute", capture_statement)
+
+        self.assertEqual(price_calls, [])
+        self.assertEqual(statements, [])
+
+    def test_signal_recorder_updates_cached_counts_on_write_and_resolution(self) -> None:
+        recorder = SignalRecorder(engine=self.engine, price_fn=lambda: 101.0)
+        recorder.record_cycle(
+            market_slug="btc-test",
+            market_start_ts=time.time() - 60,
+            market_end_ts=time.time() - 1,
+            poly_price=0.5,
+            btc_spot=100.0,
+            signals=[],
+            fused=None,
+            ml_p_up=None,
+        )
+        self.assertEqual(recorder.get_stats()["pending_resolution"], 1)
+
+        recorder._resolve_pending()
+        stats = recorder.get_stats()
+        self.assertEqual(stats["total_cycles"], 1)
+        self.assertEqual(stats["pending_resolution"], 0)
+        self.assertEqual(stats["resolved_cycles"], 1)
 
 
 if __name__ == "__main__":

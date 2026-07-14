@@ -1580,7 +1580,7 @@ class IntegratedBTCStrategy(Strategy):
             "ml_active": ml_stats.get("is_active", False),
             "ml_samples": ml_stats.get("sample_count", 0),
             "ml_min_samples": ml_stats.get("min_samples", 0),
-            "settlement_running": self.signal_recorder.get_stats().get("running", False),
+            "settlement_running": self.signal_recorder.is_running,
             "streams_ok": True,
             "completed_trades": len(settled),
             "wins": wins,
@@ -3133,7 +3133,7 @@ class IntegratedBTCStrategy(Strategy):
             activity=True,
         )
 
-        self._save_paper_trades()
+        self._save_paper_trades([paper_trade])
 
     def _close_paper_position(
         self,
@@ -3286,7 +3286,7 @@ class IntegratedBTCStrategy(Strategy):
             level=outcome_level,
         )
 
-        self._save_paper_trades()
+        self._save_paper_trades([pt])
 
     def _simulate_paper_exit(
         self,
@@ -3312,10 +3312,14 @@ class IntegratedBTCStrategy(Strategy):
         self._open_positions.pop(entry_id, None)
         self._close_paper_position(entry_id, position, exit_price, close_reason)
 
-    def _save_paper_trades(self) -> None:
+    def _save_paper_trades(
+        self, trades: Optional[List[PaperTrade]] = None
+    ) -> None:
         try:
-            trades_data = [t.to_dict() for t in self.paper_trades]
-            self.trade_history_repository.replace("paper", trades_data)
+            selected = self.paper_trades if trades is None else trades
+            self.trade_history_repository.upsert(
+                "paper", [trade.to_dict() for trade in selected]
+            )
         except Exception as e:
             logger.error(f"无法将模拟交易写入 MySQL: {e}")
 
@@ -4039,13 +4043,16 @@ class IntegratedBTCStrategy(Strategy):
             ],
         )
 
-        self._save_live_trades()
+        self._save_live_trades([live_trade])
 
-    def _save_live_trades(self) -> None:
+    def _save_live_trades(
+        self, trades: Optional[List[LiveTrade]] = None
+    ) -> None:
         """将已平仓实盘交易以单个事务持久化到 MySQL。"""
         try:
-            self.trade_history_repository.replace(
-                "live", [trade.to_dict() for trade in self.live_trades]
+            selected = self.live_trades if trades is None else trades
+            self.trade_history_repository.upsert(
+                "live", [trade.to_dict() for trade in selected]
             )
         except Exception as e:
             logger.warning(f"无法将实盘交易写入 MySQL: {e}")
