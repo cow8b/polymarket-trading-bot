@@ -22,6 +22,20 @@ python main.py --simulation     # 正常 15 分钟纸面交易模式
 python supervisor.py --live     # 实盘交易；涉及真实资金
 ```
 
+Docker 部署只包含应用容器；MySQL、Redis 使用 `.env` 中配置的外部服务。默认启动实盘：
+
+```bash
+docker compose build            # 构建应用镜像并安装依赖
+docker compose up -d            # 后台启动，默认 python main.py --live
+docker compose logs -f bot      # 查看日志
+docker compose restart bot      # 重启应用容器
+docker compose down             # 停止并移除容器
+```
+
+临时模拟运行使用 `BOT_ARGS=--simulation docker compose up`；需要终端 TUI 时使用
+`BOT_ARGS="--live --tui" docker compose up`。Docker 部署默认设置
+`LIVE_CONFIRM=true`，因此不会卡在实盘确认输入。
+
 按顺序运行分阶段检查：
 
 ```bash

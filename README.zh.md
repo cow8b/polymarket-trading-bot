@@ -155,6 +155,46 @@ python main.py --simulation
 python supervisor.py --live
 ```
 
+### 8. Docker Compose 部署
+
+Docker 部署默认使用 `.env` 中的外部 MySQL、Redis 和 Polymarket 配置，不会启动内置 MySQL/Redis，也不会使用本地代理。
+
+```bash
+# 构建应用镜像（依赖安装在镜像构建阶段完成）
+docker compose build
+
+# 后台启动；默认执行 python main.py --live
+docker compose up -d
+
+# 查看实时日志
+docker compose logs -f bot
+
+# 停止服务
+docker compose down
+
+# 重启服务
+docker compose restart bot
+```
+
+需要临时跑模拟模式时覆盖 `BOT_ARGS`：
+
+```bash
+BOT_ARGS=--simulation docker compose up
+```
+
+需要终端 TUI 时显式开启：
+
+```bash
+BOT_ARGS="--live --tui" docker compose up
+```
+
+更新代码或依赖后重新构建并启动：
+
+```bash
+docker compose build --no-cache
+docker compose up -d
+```
+
 ---
 
 ## 参数配置
