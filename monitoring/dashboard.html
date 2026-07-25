@@ -247,8 +247,8 @@
     .tree-counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 5px; }
     .tree-count { border: 0; background: transparent; padding: 2px 4px; font-size: 10px; color: #e7e0cf; text-align: right; }
     .tree-count b { color: #fff; display: inline; font-size: 11px; margin-left: 6px; text-shadow: none; }
-    /* 552px 补偿 viewBox 加高（540→570）造成的整树缩放挤压 */
-    .tree-wrap { display: grid; grid-template-columns: 130px 1fr 220px; gap: 8px; height: 552px; }
+    /* 高度与 viewBox（600 单位）等比，保持节点在屏幕上的实际大小 */
+    .tree-wrap { display: grid; grid-template-columns: 130px 1fr 220px; gap: 8px; height: 588px; }
     .legend { border: 1px solid rgba(22,19,15,.25); padding: 8px; height: max-content; margin-top: 42px; background: rgba(255,255,255,.2); }
     .legend div { margin: 5px 0; font-size: 11px; }
     /* 右栏"本轮指标"挂件与图例同语言：同边框同底色，替代裸表格 */
@@ -458,71 +458,71 @@
             <div><span class="dot" style="background:var(--blue)"></span>无持仓流转</div>
           </div>
           <div class="tree">
-            <svg viewBox="0 -30 980 570" preserveAspectRatio="xMidYMid meet" aria-label="策略实时决策流程">
+            <svg viewBox="0 -30 980 600" preserveAspectRatio="xMidYMid meet" aria-label="策略实时决策流程">
               <!-- 泳道眉标：树是真实的三段流水线，编号承载顺序信息 -->
               <g pointer-events="none">
                 <text class="lane-caption" x="92" y="-10">① 感知与过滤</text>
                 <text class="lane-caption" x="535" y="-10">② 信号与执行</text>
                 <text class="lane-caption" x="865" y="-10">③ 仓位与结算</text>
-                <path class="lane-divider" d="M300 -18 L300 520"/>
-                <path class="lane-divider" d="M715 -18 L715 520"/>
+                <path class="lane-divider" d="M300 -18 L300 560"/>
+                <path class="lane-divider" d="M715 -18 L715 560"/>
               </g>
               <defs>
                 <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#25221c"/></marker>
                 <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#00a85a"/></marker>
                 <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#d93c4d"/></marker>
               </defs>
-              <!-- 左侧：每次报价进入真实策略的基础检查链。 -->
-              <path id="e1" class="edge" d="M92 78 L92 105"/>
-              <path id="e2" class="edge" d="M92 163 L92 195"/>
-              <path id="e3" class="edge" d="M92 253 L92 286"/>
+              <!-- 节点垂直间隙统一 52px：说明文字与上下节点/连线都有呼吸空间 -->
+              <path id="e1" class="edge" d="M92 78 L92 130"/>
+              <path id="e2" class="edge" d="M92 187 L92 239"/>
+              <path id="e3" class="edge" d="M92 296 L92 348"/>
               <!-- 入场条件通过后，像参考终端一样扇出到各策略处理层。 -->
-              <path id="e4" class="edge" d="M158 326 C270 300 330 118 468 102"/>
-              <path id="e5" class="edge" d="M158 326 C285 306 348 205 478 196"/>
-              <path id="e6" class="edge" d="M158 326 C292 326 360 286 470 286"/>
-              <path id="e7" class="edge" d="M535 132 L535 168"/>
-              <path id="e8" class="edge" d="M535 226 L535 256"/>
-              <path id="e9" class="edge" d="M535 320 L535 354"/>
-              <path id="e10" class="edge" d="M595 383 C710 383 724 295 810 295"/>
-              <path id="e11" class="edge" d="M865 324 L865 355"/>
-              <path id="e12" class="edge" d="M865 413 L865 431"/>
+              <path id="e4" class="edge" d="M158 388 C280 340 330 120 468 103"/>
+              <path id="e5" class="edge" d="M158 388 C290 360 350 230 478 213"/>
+              <path id="e6" class="edge" d="M158 388 C300 388 370 326 470 326"/>
+              <path id="e7" class="edge" d="M535 132 L535 184"/>
+              <path id="e8" class="edge" d="M535 242 L535 294"/>
+              <path id="e9" class="edge" d="M535 358 L535 410"/>
+              <path id="e10" class="edge" d="M595 439 C710 439 724 315 810 315"/>
+              <path id="e11" class="edge" d="M865 344 L865 396"/>
+              <path id="e12" class="edge" d="M865 454 L865 472"/>
 
               <!-- 粒子层置于节点与文字之下：光珠沿线流动但不遮挡任何文字 -->
               <g id="flowParticles" pointer-events="none"></g>
 
               <circle id="nodeQuote" class="node dark" cx="92" cy="45" r="33"/>
               <text class="node-text light" x="92" y="40">实时</text><text class="node-text light" x="92" y="57">报价</text>
-              <rect id="nodeMarket" class="node" x="38" y="106" width="108" height="57" rx="3"/>
-              <text class="node-text" x="92" y="129">当前市场</text><text class="node-text" x="92" y="147">周期绑定</text>
-              <text class="node-caption" x="92" y="179">BTC 15分钟 UP / DOWN</text>
-              <rect id="nodeHistory" class="node" x="38" y="196" width="108" height="57" rx="3"/>
-              <text class="node-text" x="92" y="219">扫描盘口</text><text class="node-text" x="92" y="237">构建上下文</text>
-              <text class="node-caption" x="92" y="270">价格历史 / 买卖深度</text>
-              <polygon id="nodeFilter" class="node dark" points="92,286 158,326 92,366 26,326"/>
-              <text class="node-text light" x="92" y="319">入场条件</text><text class="node-text light" x="92" y="337">通过？</text>
-              <text class="node-caption" x="92" y="385">窗口 / 价差 / 流动性</text>
+              <rect id="nodeMarket" class="node" x="38" y="130" width="108" height="57" rx="3"/>
+              <text class="node-text" x="92" y="153">当前市场</text><text class="node-text" x="92" y="171">周期绑定</text>
+              <text class="node-caption" x="92" y="205">BTC 15分钟 UP / DOWN</text>
+              <rect id="nodeHistory" class="node" x="38" y="239" width="108" height="57" rx="3"/>
+              <text class="node-text" x="92" y="262">扫描盘口</text><text class="node-text" x="92" y="280">构建上下文</text>
+              <text class="node-caption" x="92" y="314">价格历史 / 买卖深度</text>
+              <polygon id="nodeFilter" class="node dark" points="92,348 158,388 92,428 26,388"/>
+              <text class="node-text light" x="92" y="381">入场条件</text><text class="node-text light" x="92" y="399">通过？</text>
+              <text class="node-caption" x="92" y="447">窗口 / 价差 / 流动性</text>
 
               <rect id="nodeSignal" class="node" x="468" y="74" width="134" height="58" rx="3"/>
               <text class="node-text" x="535" y="97">信号处理</text><text class="node-text" x="535" y="115">与特征提取</text>
-              <text class="node-caption" x="535" y="148">动量 / CVD / PCR / OI</text>
-              <rect id="nodeFusion" class="node" x="478" y="168" width="114" height="58" rx="3"/>
-              <text class="node-text" x="535" y="191">多信号</text><text class="node-text" x="535" y="209">融合决策</text>
-              <text class="node-caption" x="535" y="242">加权分数与方向共识</text>
-              <polygon id="nodeMl" class="node dark" points="535,256 600,288 535,320 470,288"/>
-              <text class="node-text light" x="535" y="282">模型优势</text><text class="node-text light" x="535" y="300">与风控通过？</text>
-              <text class="node-caption" x="535" y="338">概率差 / 仓位 / 追价限制</text>
-              <rect id="nodeOrder" class="node" x="475" y="354" width="120" height="58" rx="3"/>
-              <text class="node-text" x="535" y="377">提交订单</text><text class="node-text" x="535" y="395">等待成交</text>
-              <text class="node-caption" x="535" y="428">IOC 市价单 / 模拟成交</text>
+              <text class="node-caption" x="535" y="150">动量 / CVD / PCR / OI</text>
+              <rect id="nodeFusion" class="node" x="478" y="184" width="114" height="58" rx="3"/>
+              <text class="node-text" x="535" y="207">多信号</text><text class="node-text" x="535" y="225">融合决策</text>
+              <text class="node-caption" x="535" y="260">加权分数与方向共识</text>
+              <polygon id="nodeMl" class="node dark" points="535,294 600,326 535,358 470,326"/>
+              <text class="node-text light" x="535" y="319">模型优势</text><text class="node-text light" x="535" y="337">与风控通过？</text>
+              <text class="node-caption" x="535" y="378">概率差 / 仓位 / 追价限制</text>
+              <rect id="nodeOrder" class="node" x="475" y="410" width="120" height="58" rx="3"/>
+              <text class="node-text" x="535" y="433">提交订单</text><text class="node-text" x="535" y="451">等待成交</text>
+              <text class="node-caption" x="535" y="486">IOC 市价单 / 模拟成交</text>
 
-              <rect id="nodePosition" class="node" x="810" y="266" width="110" height="58" rx="3"/>
-              <text class="node-text" x="865" y="289">仓位建立</text><text class="node-text" x="865" y="307">实时跟踪</text>
-              <text class="node-caption" x="865" y="340">止盈 / 止损 / 到期</text>
-              <rect id="nodeSettle" class="node" x="810" y="355" width="110" height="58" rx="3"/>
-              <text class="node-text" x="865" y="378">退出成交</text><text class="node-text" x="865" y="396">结算收益</text>
-              <circle id="treePnlDisk" cx="865" cy="476" r="45" fill="#168c55" stroke="#0e0d0b" stroke-width="2"/>
-              <text id="treePnlText" class="node-text light" x="865" y="468">本轮 PNL</text>
-              <text id="treePnlValue" class="node-text light" x="865" y="490">$0</text>
+              <rect id="nodePosition" class="node" x="810" y="286" width="110" height="58" rx="3"/>
+              <text class="node-text" x="865" y="309">仓位建立</text><text class="node-text" x="865" y="327">实时跟踪</text>
+              <text class="node-caption" x="865" y="362">止盈 / 止损 / 到期</text>
+              <rect id="nodeSettle" class="node" x="810" y="396" width="110" height="58" rx="3"/>
+              <text class="node-text" x="865" y="419">退出成交</text><text class="node-text" x="865" y="437">结算收益</text>
+              <circle id="treePnlDisk" cx="865" cy="517" r="45" fill="#168c55" stroke="#0e0d0b" stroke-width="2"/>
+              <text id="treePnlText" class="node-text light" x="865" y="509">本轮 PNL</text>
+              <text id="treePnlValue" class="node-text light" x="865" y="531">$0</text>
               <g id="nodeBeacons" pointer-events="none"></g>
             </svg>
           </div>
