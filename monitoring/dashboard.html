@@ -147,7 +147,9 @@
     .rc-scale { position: relative; height: 14px; margin-top: 3px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
     .rc-scale > span { position: absolute; transform: translateX(-50%); }
     .rc-scale > span:first-child { transform: none; }
-    .rc-winmark { transform: none !important; text-align: center; color: #0e5c38; letter-spacing: 2px; }
+    .rc-endmark { left: auto !important; right: 0; transform: none !important; }
+    /* 入场窗字标：窗口很窄（默认 90 秒 =10% 宽），居中允许溢出但不换行 */
+    .rc-winmark { transform: none !important; text-align: center; color: #0e5c38; letter-spacing: 1px; white-space: nowrap; overflow: visible; }
     .rc-baseline { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-top: 4px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
     .rc-baseline b { color: var(--ink); font-size: 14px; }
     .rc-delta { font-size: 20px; font-weight: 900; color: var(--ink); white-space: nowrap; }
@@ -357,16 +359,16 @@
       </div>
       <div class="rc-cell rc-band">
         <div class="rc-track">
-          <div id="rcZoneTrade" class="rc-zone trade" title="交易窗口：允许开新仓"></div>
-          <div id="rcZoneSettle" class="rc-zone settle" title="禁入等待结算"></div>
+          <div id="rcZoneTrade" class="rc-zone trade" title="入场窗口：策略仅在此区间开新仓（默认 13:00–14:30，共 90 秒）"></div>
+          <div id="rcZoneSettle" class="rc-zone settle" title="强制平仓与结算：窗口结束后不再入场，持仓到期强平"></div>
           <div class="rc-ticks" aria-hidden="true"></div>
           <div id="rcElapsed" class="rc-elapsed"></div>
           <div id="rcNeedle" class="rc-needle"></div>
         </div>
         <div class="rc-scale" aria-hidden="true">
           <span style="left:0">0</span><span style="left:33.33%">5m</span>
-          <span style="left:66.66%">10m</span><span style="left:100%">15m</span>
-          <span id="rcWinMark" class="rc-winmark" style="left:33.33%;width:53.33%">交易窗口</span>
+          <span style="left:66.66%">10m</span><span class="rc-endmark">15m</span>
+          <span id="rcWinMark" class="rc-winmark" style="left:86.67%;width:10%">入场窗</span>
         </div>
         <div class="rc-baseline">
           <span>开盘 <b id="rcOpen">—</b></span>
@@ -778,9 +780,11 @@
       $("upBox").className = "direction-box up" + (isUp ? " on" : "");
       $("downBox").className = "direction-box down" + (!isUp ? " on" : "");
       // ── 回合钟（HERO）：进度带 + 开盘价基线 + 价差走针 + 定价 + 倒计时 ──
-      // 行为分区：按策略真实交易窗口（秒）标出 可交易/禁入等待结算 区段
+      // 行为分区：按策略真实交易窗口（秒）标出 观察期/入场窗/强平结算 区段。
+      // 代码默认窗口 780-870（第 13:00-14:30 共 90 秒，趋势确立后末段入场），
+      // 回退值与之保持一致
       const win = Array.isArray(live.trade_window_sec) && live.trade_window_sec.length === 2
-        ? live.trade_window_sec : [300, 780];
+        ? live.trade_window_sec : [780, 870];
       const winL = Math.max(0, Math.min(100, (win[0] / 900) * 100));
       const winR = Math.max(winL, Math.min(100, (win[1] / 900) * 100));
       $("rcZoneTrade").style.left = winL + "%";
