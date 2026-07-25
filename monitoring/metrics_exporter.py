@@ -596,6 +596,35 @@ class GrafanaMetricsExporter:
         except Exception as e:
             logger.debug(f"update_signal_processor({name}) error: {e}")
 
+    def update_market_indicators(
+        self,
+        *,
+        rsi: Optional[float] = None,
+        macd_histogram: Optional[float] = None,
+        funding_rate: Optional[float] = None,
+        cvd_delta: Optional[float] = None,
+        fear_greed: Optional[float] = None,
+    ) -> None:
+        """每个决策周期无条件写入市场指标。
+
+        处理器只有在触发信号时才带 metadata 走 update_signal_processor，
+        RSI/资金费率/CVD/恐惧贪婪这些指标 Gauge 否则永远是 0——但策略的
+        市场上下文每个周期都算好了这些值，从这里直接推送。
+        """
+        try:
+            if rsi is not None:
+                self.ohlcv_rsi.set(float(rsi))
+            if macd_histogram is not None:
+                self.ohlcv_macd_histogram.set(float(macd_histogram))
+            if funding_rate is not None:
+                self.funding_rate.set(float(funding_rate))
+            if cvd_delta is not None:
+                self.cvd_delta.set(float(cvd_delta))
+            if fear_greed is not None:
+                self.fear_greed_index.set(float(fear_greed))
+        except Exception as e:
+            logger.debug(f"update_market_indicators error: {e}")
+
     def _apply_processor_metadata(self, name: str, md: Dict[str, Any]) -> None:
         """Route processor-specific metadata fields to dedicated gauges."""
         try:

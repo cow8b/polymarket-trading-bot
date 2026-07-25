@@ -2568,6 +2568,21 @@ class IntegratedBTCStrategy(Strategy):
                         direction=_dir,
                         metadata=sig.metadata or {},
                     )
+                # 无论处理器是否触发信号，都推送一次市场指标——否则驾驶舱
+                # 的 RSI/资金费率/CVD/恐惧贪婪四格只有在对应处理器开火时
+                # 才有值，绝大多数时间显示为空。
+                ohlcv = self.ohlcv_momentum_processor._fetch_klines() or {}
+                self.grafana_exporter.update_market_indicators(
+                    rsi=ohlcv.get("rsi"),
+                    macd_histogram=(
+                        ohlcv["macd_line"] - ohlcv["macd_signal"]
+                        if "macd_line" in ohlcv and "macd_signal" in ohlcv
+                        else None
+                    ),
+                    funding_rate=metadata.get("funding_rate"),
+                    cvd_delta=metadata.get("cvd_delta_usd"),
+                    fear_greed=metadata.get("sentiment_score"),
+                )
             except Exception:
                 pass
 

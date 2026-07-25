@@ -1265,8 +1265,12 @@
       $("analyticsRsi").textContent = hasValue(ind.ohlcv_rsi) ? fmt.num(ind.ohlcv_rsi, 1) : "—";
       $("analyticsFunding").textContent = Number.isFinite(Number(ind.funding_rate))
         ? `${(Number(ind.funding_rate) * 100).toFixed(4)}%` : "—";
-      $("analyticsCvd").textContent = Number.isFinite(Number(ind.cvd_delta))
-        ? fmt.num(ind.cvd_delta, 2) : "—";
+      const cvd = Number(ind.cvd_delta);
+      $("analyticsCvd").textContent = Number.isFinite(cvd)
+        ? (Math.abs(cvd) >= 1e6 ? `${(cvd / 1e6).toFixed(2)}M`
+           : Math.abs(cvd) >= 1e3 ? `${(cvd / 1e3).toFixed(1)}K`
+           : cvd.toFixed(2))
+        : "—";
       $("analyticsFg").textContent = hasValue(ind.fear_greed_index)
         ? fmt.int(ind.fear_greed_index) : "—";
       miniChart("analyticsRsiChart", series("processor_indicators.ohlcv_rsi"), "#1674c9");
