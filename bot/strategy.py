@@ -36,6 +36,7 @@ from bot.models import (
     LiveTrade,
     PaperTrade,
     _make_stub_signal,
+    interp_exit_fracs,
 )
 from core.analytics import calculate_prediction_edge, calculate_strategy_edge
 from core.database import OrderLifecycleRepository, TradeHistoryRepository
@@ -205,6 +206,34 @@ class IntegratedBTCStrategy(Strategy):
             self._max_spread_pct = max(0.0, float(os.getenv("MAX_SPREAD_PCT", "0.05")))
         except (TypeError, ValueError):
             self._max_spread_pct = 0.05
+
+        # 按入场价线性插值的 SL/TP 端点（.env.example 描述已久、此前从未
+        # 实现的矩阵）。四个变量齐备才启用；否则沿用固定
+        # STOP_LOSS_PCT / TAKE_PROFIT_PCT 的旧行为。
+        def _frac_env(name: str) -> Optional[float]:
+            raw = (os.getenv(name) or "").strip()
+            if not raw:
+                return None
+            try:
+                return max(0.0, min(1.0, float(raw)))
+            except (TypeError, ValueError):
+                logger.warning(f"Invalid {name}={raw!r}; SL/TP 插值端点被忽略")
+                return None
+
+        endpoints = (
+            _frac_env("SL_PCT_AT_MIN_ENTRY"),
+            _frac_env("SL_PCT_AT_MAX_ENTRY"),
+            _frac_env("TP_PCT_AT_MIN_ENTRY"),
+            _frac_env("TP_PCT_AT_MAX_ENTRY"),
+        )
+        self._sl_tp_endpoints = endpoints if all(v is not None for v in endpoints) else None
+        if self._sl_tp_endpoints:
+            logger.info(
+                "SL/TP 按入场价插值已启用: "
+                f"SL {endpoints[0]:.0%}→{endpoints[1]:.0%}, "
+                f"TP {endpoints[2]:.0%}→{endpoints[3]:.0%} "
+                f"(带 [{self._min_entry_price:.2f}, {self._max_entry_price:.2f}])"
+            )
 
         # ── Trade-window / cooldown ──────────────────────────────────────
         # Entry window: seconds 780-870 of each 15-min market (13:00 – 14:30).
@@ -600,12 +629,26 @@ class IntegratedBTCStrategy(Strategy):
         sl_enabled = (
             self._stop_loss_enabled if stop_loss_enabled is None else stop_loss_enabled
         )
-        sl_frac = Decimal(str(
-            self._stop_loss_frac if stop_loss_frac is None else stop_loss_frac
-        ))
-        tp_frac = Decimal(str(
-            self._take_profit_frac if take_profit_frac is None else take_profit_frac
-        ))
+        if (
+            self._sl_tp_endpoints
+            and stop_loss_frac is None
+            and take_profit_frac is None
+        ):
+            # 低价入场宽 SL/耐心 TP，高价入场紧 SL/快 TP
+            sl_v, tp_v = interp_exit_fracs(
+                float(fill_price),
+                self._min_entry_price,
+                self._max_entry_price,
+                *self._sl_tp_endpoints,
+            )
+            sl_frac, tp_frac = Decimal(str(sl_v)), Decimal(str(tp_v))
+        else:
+            sl_frac = Decimal(str(
+                self._stop_loss_frac if stop_loss_frac is None else stop_loss_frac
+            ))
+            tp_frac = Decimal(str(
+                self._take_profit_frac if take_profit_frac is None else take_profit_frac
+            ))
 
         remaining_upside = max(Decimal("0"), Decimal("1") - fill_price)
         take_profit = min(Decimal("0.99"), fill_price + tp_frac * remaining_upside)

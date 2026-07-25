@@ -218,3 +218,26 @@ def _make_stub_signal(direction: str, ml_p_up: Optional[float] = None):
     d = SignalDirection.BULLISH if direction == "long" else SignalDirection.BEARISH
     conf = ml_p_up if ml_p_up is not None else 0.60
     return _Stub(direction=d, score=conf * 100, confidence=conf)
+
+
+def interp_exit_fracs(
+    entry_price: float,
+    min_entry: float,
+    max_entry: float,
+    sl_at_min: float,
+    sl_at_max: float,
+    tp_at_min: float,
+    tp_at_max: float,
+) -> tuple:
+    """按入场价在 [min_entry, max_entry] 带内线性插值 SL/TP 比例。
+
+    低价入场 → 宽止损 + 耐心止盈（不对称上行值得等）；高价入场 → 紧止损 +
+    快止盈（距 1.0 空间小，须尽快锁定）。入场价越出带按端点截断。
+    这是 .env.example 中描述已久的 SL/TP 矩阵的实际实现。
+    """
+    lo, hi = float(min_entry), float(max_entry)
+    e = min(max(float(entry_price), lo), hi)
+    t = 0.0 if hi <= lo else (e - lo) / (hi - lo)
+    sl = sl_at_min + (sl_at_max - sl_at_min) * t
+    tp = tp_at_min + (tp_at_max - tp_at_min) * t
+    return sl, tp
