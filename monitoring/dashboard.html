@@ -159,14 +159,16 @@
     .scanner-plus { align-self: end; padding-bottom: 2px; color: var(--ink); font-size: 19px; font-weight: 900; }
     .scanner-empty { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
     .scan-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; margin-bottom: 6px; }
+    /* 与本卡片 UP/DOWN 盘口报价配色一致：红=上涨、绿=下跌 */
     .scan-open { font-size: 11px; color: var(--muted); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
     .scan-open b { font-weight: 700; }
-    .scan-open b.up { color: var(--green); }
-    .scan-open b.down { color: var(--red); }
+    .scan-open b.up { color: var(--red); }
+    .scan-open b.down { color: var(--green); }
     .direction-boxes { display: flex; gap: 5px; margin: 6px 0; }
     .direction-box { padding: 3px 7px; border: 1px solid #222; background: transparent; font-size: 9px; }
-    .direction-box.on.up { color: var(--green); border-color: rgba(0,255,102,.55); box-shadow: 0 0 8px rgba(0,255,102,.25); }
-    .direction-box.on.down { color: var(--red); border-color: rgba(255,51,102,.55); box-shadow: 0 0 8px rgba(255,51,102,.25); }
+    /* 突破方向框与 UP/DOWN 报价配色一致：红=上行、绿=下行 */
+    .direction-box.on.up { color: var(--red); border-color: rgba(255,51,102,.55); box-shadow: 0 0 8px rgba(255,51,102,.25); }
+    .direction-box.on.down { color: var(--green); border-color: rgba(0,255,102,.55); box-shadow: 0 0 8px rgba(0,255,102,.25); }
     .spark { height: 136px; border: 1px solid rgba(22,19,15,.42); background: #f3eddd; }
     .tree-counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 5px; }
     .tree-count { border: 0; background: transparent; padding: 2px 4px; font-size: 9px; color: #e7e0cf; text-align: right; }
@@ -473,11 +475,19 @@
           if (!r.ok) throw new Error(`snapshot ${r.status}`);
           return r.json();
         });
-        try {
-          const hist = await fetchApi("/api/dashboard/history?limit=600", 3000).then(r => r.ok ? r.json() : {points: []});
-          state.history = hist.points || [];
-        } catch (_) {
-          state.history = state.history || [];
+        // 历史序列增量维护：首次与每 30 秒全量校准一次（防漂移），
+        // 其余轮询直接用本次 snapshot 在本地追加，避免每秒重拉约 2.4MB 全量历史。
+        const needFullHistory = !state.histSyncedAt || (Date.now() - state.histSyncedAt > 30000);
+        if (needFullHistory) {
+          try {
+            const hist = await fetchApi("/api/dashboard/history?limit=600", 3000).then(r => r.ok ? r.json() : {points: []});
+            state.history = hist.points || [];
+            state.histSyncedAt = Date.now();
+          } catch (_) {
+            state.history = state.history || [];
+          }
+        } else {
+          appendHistoryPoint(snap);
         }
         try {
           render(snap);
@@ -588,7 +598,8 @@
           + `<span class="scanner-plus">+</span>`
           + `<span class="scanner-quote"><span class="scanner-label">下跌（DOWN）</span><span class="scanner-price green">${fmt.num(downQuote, 2)}</span></span>`
         : `<span class="scanner-empty">等待真实对冲报价</span>`;
-      const isUp = hasOrderQuote && upQuote <= downQuote;
+      // UP 报价更高 = 市场定价上涨方更可能赢 → 上行占优（原判断写反）
+      const isUp = hasOrderQuote && upQuote >= downQuote;
       $("upBox").className = "direction-box up" + (isUp ? " on" : "");
       $("downBox").className = "direction-box down" + (!isUp ? " on" : "");
       $("footerFills").textContent = fmt.int(e.orders_filled_total);
@@ -977,6 +988,28 @@
     }
     function series(path) {
       return state.history.map(p => path.split(".").reduce((o,k)=>o&&o[k], p) || 0);
+    }
+    // 用本次 snapshot 构造与服务端 /history 同结构的采样点，本地追加
+    function appendHistoryPoint(s) {
+      const live = s.live_state || {};
+      state.history.push({
+        ts: s.timestamp,
+        portfolio: s.portfolio, risk: s.risk, trade_stats: s.trade_stats,
+        fusion_ml: s.fusion_ml, execution: s.execution, latest_order: s.latest_order,
+        processor_indicators: s.processor_indicators,
+        live_state: {
+          btc_price: live.btc_price, eth_price: live.eth_price,
+          up_price: live.up_price, down_price: live.down_price,
+          market_slug: live.market_slug, market_start: live.market_start, market_end: live.market_end,
+          quote_updated_at: live.quote_updated_at, orderbook_updated_at: live.orderbook_updated_at,
+          mode: live.mode, total_volume_usd: live.total_volume_usd,
+          prediction_edge: live.prediction_edge, strategy_edge: live.strategy_edge,
+          order_stats: live.order_stats,
+        },
+        processor_scores: Object.fromEntries(Object.entries(s.processors || {}).map(([k, v]) => [k, v?.score || 0])),
+        processor_directions: Object.fromEntries(Object.entries(s.processors || {}).map(([k, v]) => [k, v?.direction || 0])),
+      });
+      if (state.history.length > 600) state.history.splice(0, state.history.length - 600);
     }
     function line(canvas, datasets, colors=["#00ff66","#ff3366","#ffd84d","#00b7ff"], fill=false) {
       const c = $(canvas), ctx = c.getContext("2d"), rect = c.getBoundingClientRect(), dpr = devicePixelRatio || 1;
