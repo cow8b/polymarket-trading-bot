@@ -218,9 +218,10 @@
     .tree-count { border: 0; background: transparent; padding: 2px 4px; font-size: 10px; color: #e7e0cf; text-align: right; }
     .tree-count b { color: #fff; display: inline; font-size: 11px; margin-left: 6px; text-shadow: none; }
     .tree-wrap { display: grid; grid-template-columns: 130px 1fr 220px; gap: 8px; height: 520px; }
-    .legend { border: 1px solid rgba(22,19,15,.25); padding: 7px; height: max-content; margin-top: 42px; background: rgba(255,255,255,.2); }
-    .legend div { margin: 5px 0; font-size: 10px; }
-    .eff-table { font-size: 10px; text-align: left; }
+    .legend { border: 1px solid rgba(22,19,15,.25); padding: 8px; height: max-content; margin-top: 42px; background: rgba(255,255,255,.2); }
+    .legend div { margin: 5px 0; font-size: 11px; }
+    /* 右栏"本轮指标"挂件与图例同语言：同边框同底色，替代裸表格 */
+    .eff-table { font-size: 11px; text-align: left; border: 1px solid rgba(22,19,15,.25); background: rgba(255,255,255,.2); padding: 8px; height: max-content; margin-top: 42px; }
     .eff-row { display: grid; grid-template-columns: 1fr 52px; gap: 5px; padding: 6px 8px; border: 1px solid rgba(22,19,15,.24); margin-bottom: 5px; background: rgba(255,255,255,.18); }
     .dot { display: inline-block; width: 9px; height: 9px; margin-right: 7px; }
     .tree { min-width: 0; height: 520px; }
@@ -273,12 +274,10 @@
       .marquee .track, .edge.active, .node.active, .node-beacon, .focus-bar.event-flash { animation: none !important; }
     }
     a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
-    /* 决策树折中方案：待命时折叠释放首屏，决策进行时自动展开 */
-    .tree-collapse-hint { float: right; color: var(--muted); font-size: 10px; font-weight: 400; letter-spacing: 0; }
-    #treePanel .tree-wrap { transition: max-height .5s ease, opacity .35s ease; max-height: 560px; overflow: hidden; }
-    #treePanel.tree-collapsed .tree-wrap { max-height: 0; opacity: 0; }
-    #treePanel.tree-collapsed { min-height: 0; }
-    @media (prefers-reduced-motion: reduce) { #treePanel .tree-wrap { transition: none; } }
+    /* 决策树常驻显示（应接手方要求保留门面地位） */
+    .lane-caption { fill: var(--muted); font-size: 11px; text-anchor: middle; letter-spacing: 3px; }
+    .lane-divider { stroke: rgba(22,19,15,.12); stroke-dasharray: 3 6; fill: none; }
+    .rail-title { color: var(--muted); font-size: 10px; letter-spacing: 1px; margin-bottom: 6px; }
     .focus-main { font-size: 13px; font-weight: 900; }
     .focus-pnl { font-size: 26px; font-weight: 900; text-align: center; text-shadow: 0 0 12px currentColor; }
     .focus-desc { color: var(--muted); font-size: 10px; text-align: right; }
@@ -388,7 +387,7 @@
 
     <section class="main-bottom">
       <div class="panel" id="treePanel">
-        <h2>策略决策树流程图 <span id="treeMode" class="tree-mode">策略待命</span><span class="tree-collapse-hint" aria-hidden="true">待命时自动折叠 · 决策进行时展开</span></h2>
+        <h2>策略决策树流程图 <span id="treeMode" class="tree-mode">策略待命</span></h2>
         <div class="tree-counts">
           <div class="tree-count">持仓中<b id="inFlight">0</b></div>
           <div class="tree-count">本轮信号<b id="processed">0</b></div>
@@ -397,14 +396,26 @@
         </div>
         <div class="tree-wrap">
           <div class="legend">
-            <div><span class="dot" style="background:var(--green)"></span>交易激活</div>
-            <div><span class="dot" style="background:#8aff80"></span>扫描中</div>
-            <div><span class="dot" style="background:var(--blue)"></span>成交 / 胜利</div>
-            <div><span class="dot" style="background:var(--yellow)"></span>风控锁定</div>
-            <div><span class="dot" style="background:var(--red)"></span>丢弃 / 亏损</div>
+            <div class="rail-title">节点状态</div>
+            <div><span class="dot" style="background:#00a85a"></span>进行中</div>
+            <div><span class="dot" style="background:var(--blue)"></span>已完成</div>
+            <div><span class="dot" style="background:var(--red)"></span>风控拦截</div>
+            <div><span class="dot" style="background:#b7b0a3"></span>待命</div>
+            <div class="rail-title" style="margin-top:10px">流动光点</div>
+            <div><span class="dot" style="background:#00ff73"></span>本轮盈利</div>
+            <div><span class="dot" style="background:#ff335f"></span>本轮亏损</div>
+            <div><span class="dot" style="background:var(--blue)"></span>无持仓流转</div>
           </div>
           <div class="tree">
-            <svg viewBox="0 0 980 540" preserveAspectRatio="xMidYMid meet" aria-label="策略实时决策流程">
+            <svg viewBox="0 -30 980 570" preserveAspectRatio="xMidYMid meet" aria-label="策略实时决策流程">
+              <!-- 泳道眉标：树是真实的三段流水线，编号承载顺序信息 -->
+              <g pointer-events="none">
+                <text class="lane-caption" x="92" y="-10">① 感知与过滤</text>
+                <text class="lane-caption" x="535" y="-10">② 信号与执行</text>
+                <text class="lane-caption" x="865" y="-10">③ 仓位与结算</text>
+                <path class="lane-divider" d="M300 -18 L300 520"/>
+                <path class="lane-divider" d="M715 -18 L715 520"/>
+              </g>
               <defs>
                 <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#25221c"/></marker>
                 <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="#00a85a"/></marker>
@@ -463,6 +474,7 @@
             </svg>
           </div>
           <div class="eff-table">
+            <div class="rail-title">本轮指标</div>
             <div class="eff-row"><span>CVD/盘口触发</span><b id="effStale" class="green">0</b></div>
             <div class="eff-row"><span>融合分数</span><b id="effFav" class="yellow">0.0</b></div>
             <div class="eff-row"><span>入场成交率</span><b id="effFill" class="blue" title="有成交的入场订单数 / 已提交入场订单数">—</b></div>
@@ -1076,13 +1088,9 @@
             : (live.mode === "live" ? "实盘扫描 · 等待策略触发" : waitingText);
           mode.className = "tree-mode";
         }
-        // 待命：折叠树体释放首屏（表头与状态徽标保留可见）
-        $("treePanel")?.classList.add("tree-collapsed");
         syncFlowEffects(flowPnls.length ? flowPnls : [0]);
         return;
       }
-      // 决策进行/回放中：展开树体
-      $("treePanel")?.classList.remove("tree-collapsed");
       stages.forEach(item => {
         const target = map[item.stage];
         if (!target) return;
