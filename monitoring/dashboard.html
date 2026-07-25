@@ -58,7 +58,9 @@
        报头行 + 状态带（LIVE FEED 跑马灯 ▸ 子系统健康 chips） */
     .statusband { display: flex; gap: 6px; align-items: stretch; margin: 0 0 6px; }
     .statusband .marquee { flex: 1; min-width: 0; margin: 0; }
-    .statusband .sysbar { margin: 0; flex: 0 0 auto; flex-wrap: nowrap; align-items: center; overflow: hidden; }
+    /* chips 收紧并限宽，保证跑马灯至少占一半以上；两块同底色减少割裂感 */
+    .statusband .sysbar { margin: 0; flex: 0 0 auto; max-width: 44%; flex-wrap: nowrap; align-items: center; overflow: hidden; gap: 4px; }
+    .statusband .sys-chip { letter-spacing: .5px; padding: 2px 6px; }
     .brand, .price-strip, .clock, .panel {
       background: linear-gradient(180deg, #f8f2e5, #eee7d8);
       border: 1px solid #16130f;
@@ -220,6 +222,8 @@
     .book-depth { position: absolute; inset: 1px 0 1px auto; opacity: .13; z-index: 0; }
     .book-row.ask .book-depth { background: var(--red); }
     .book-row.bid .book-depth { background: var(--green); }
+    /* 持仓空态：单行铺开，不套用 4 列网格（避免断词折行与悬空破折号） */
+    .pos-empty { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 10px; border-bottom: 1px dashed rgba(22,19,15,.22); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .pos-list, .logs { overflow-y: auto; scrollbar-color: var(--green) #111; }
     .pos-list { max-height: 252px; }
     .pos-row { display: grid; grid-template-columns: 32px 48px 1fr 56px; gap: 5px; padding: 4px 0; border-bottom: 1px dashed rgba(22,19,15,.22); font-size: 10px; }
@@ -313,7 +317,11 @@
     .footer-head-stat b { color: #fff; font-size: 10px; }
     .footer-live { color: var(--red); text-shadow: 0 0 6px rgba(217,60,77,.7); }
     .footer-pnl-summary { display: flex; justify-content: space-between; align-items: baseline; min-height: 28px; padding: 1px 3px 5px; border-bottom: 1px dashed rgba(22,19,15,.3); font-size: 10px; color: var(--muted); }
-    .footer-pnl-summary b { margin-left: 5px; color: var(--green); font-size: 17px; text-shadow: 0 0 7px rgba(22,140,85,.25); }
+    /* 值色默认中性墨，盈亏由 .pnl-pos/.pnl-neg 决定（原写死绿色且
+       优先级压过语义类，导致负收益也显示绿色） */
+    .footer-pnl-summary b { margin-left: 5px; color: var(--ink); font-size: 17px; }
+    .footer-pnl-summary b.pnl-pos { color: var(--pnl-pos); }
+    .footer-pnl-summary b.pnl-neg { color: var(--pnl-neg); }
     .footer-chart { position: relative; flex: 1; min-height: 216px; margin-top: 4px; border: 1px solid rgba(22,19,15,.42); background: linear-gradient(180deg, #f5efdf, #ded8cb); overflow: hidden; }
     .footer-chart canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
     /* 8 格 = 2 列 × 4 行（原 repeat(2,106px) 只为 4 格设计，扩格后
@@ -323,7 +331,9 @@
     .analytics-cell:nth-child(2n) { border-right: 0; }
     .analytics-cell:nth-last-child(-n+2) { border-bottom: 0; }
     .analytics-label { height: 26px; display: flex; justify-content: space-between; align-items: center; padding: 3px 7px; color: var(--muted); font-size: 10px; letter-spacing: 1px; }
-    .analytics-label b { color: var(--green); font-size: 11px; }
+    .analytics-label b { color: var(--ink); font-size: 11px; }
+    .analytics-label b.pnl-pos { color: var(--pnl-pos); }
+    .analytics-label b.pnl-neg { color: var(--pnl-neg); }
     .analytics-cell canvas { width: 100%; height: 79px; }
     .logs { flex: 1; height: auto; min-height: 231px; background: rgba(255,255,255,.2); border: 1px solid rgba(22,19,15,.42); padding: 6px; font-size: 11px; line-height: 1.4; }
     .log-line { padding: 1px 0; color: var(--muted); }
@@ -662,8 +672,11 @@
         const freshness = [live.quote_updated_at, live.orderbook_updated_at, live.candles_updated_at]
           .map(v => v ? new Date(v).getTime() : 0).filter(Boolean);
         const age = freshness.length ? (Date.now() - Math.max(...freshness)) / 1000 : Infinity;
-        $("conn").textContent = !freshness.length ? "服务在线 · 等待行情" : (age <= 5 ? "服务在线 · 行情实时" : "服务在线 · 行情过期");
-        $("conn").className = "status" + (age > 5 ? " yellow" : "");
+        // 与健康条同一套阈值：≤10s 实时、≤60s 稍歇（观察期正常）、更久才算过期
+        $("conn").textContent = !freshness.length
+          ? "服务在线 · 等待行情"
+          : (age <= 10 ? "服务在线 · 行情实时" : (age <= 60 ? "服务在线 · 行情稍歇" : "服务在线 · 行情过期"));
+        $("conn").className = "status" + (age > 60 ? " yellow" : "");
       } catch (err) {
         state.failures += 1;
         state.lastError = String(err?.message || err || "未知错误");
@@ -918,6 +931,7 @@
         treeDisk.setAttribute("fill", v >= 0 ? "#0e5c38" : "#a32a38");
       }
       $("analyticsPnl").textContent = fmt.usd(p.total_pnl);
+      $("analyticsPnl").className = p.total_pnl >= 0 ? "pnl-pos" : "pnl-neg";
       const eventVolume = (Array.isArray(s.dashboard_events) ? s.dashboard_events : []).reduce((sum, ev) => {
         const payload = ev.payload || {};
         return sum + (Number(payload.notional_usd) || Number(payload.size_usd) || 0);
@@ -962,7 +976,7 @@
       const exposure = positions.reduce((sum, pos) => sum + Number(pos.size_usd || 0), 0);
       $("openSummary").textContent = `${fmt.usd(unrealized)} / ${fmt.usd(exposure)}`;
       if (!positions.length) {
-        rows.push(`<div class="pos-row muted"><span>—</span><span class="tag">空仓</span><span>空仓 · 交易窗口内满足条件将自动建仓</span><span>—</span></div>`);
+        rows.push(`<div class="pos-empty muted"><span class="tag">空仓</span><span>交易窗口内满足条件将自动建仓</span></div>`);
       }
       for (const pos of positions) {
         const pnl = Number(pos.unrealized_pnl || 0);
