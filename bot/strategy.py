@@ -4057,21 +4057,34 @@ class IntegratedBTCStrategy(Strategy):
 
         # Payoff-relative TP/SL — shared with paper simulation via
         # ``_compute_exit_levels``.
+        # 插值启用时按真实成交价现算（下单时快照的固定值无法预知 fill
+        # price）；未启用时沿用快照，保持"下单时配置固化"的原语义。
         sl_enabled = bool(pending.get("stop_loss_enabled", self._stop_loss_enabled))
+        use_interp = self._sl_tp_endpoints is not None
         stop_loss, take_profit, sl_enabled = self._compute_exit_levels(
             fill_price,
             stop_loss_enabled=sl_enabled,
-            stop_loss_frac=pending.get("stop_loss_frac", self._stop_loss_frac),
-            take_profit_frac=pending.get("take_profit_frac", self._take_profit_frac),
+            stop_loss_frac=None if use_interp else pending.get("stop_loss_frac", self._stop_loss_frac),
+            take_profit_frac=None if use_interp else pending.get("take_profit_frac", self._take_profit_frac),
         )
-        sl_frac = Decimal(str(
-            pending.get("stop_loss_frac",
-                pending.get("stop_loss_pct", self._stop_loss_frac))
-        )) if sl_enabled else Decimal("0")
-        tp_frac = Decimal(str(
-            pending.get("take_profit_frac",
-                pending.get("take_profit_pct", self._take_profit_frac))
-        ))
+        if use_interp:
+            sl_v, tp_v = interp_exit_fracs(
+                float(fill_price),
+                self._min_entry_price,
+                self._max_entry_price,
+                *self._sl_tp_endpoints,
+            )
+            sl_frac = Decimal(str(sl_v)) if sl_enabled else Decimal("0")
+            tp_frac = Decimal(str(tp_v))
+        else:
+            sl_frac = Decimal(str(
+                pending.get("stop_loss_frac",
+                    pending.get("stop_loss_pct", self._stop_loss_frac))
+            )) if sl_enabled else Decimal("0")
+            tp_frac = Decimal(str(
+                pending.get("take_profit_frac",
+                    pending.get("take_profit_pct", self._take_profit_frac))
+            ))
 
         position = {
             "instrument_id": pending["instrument_id"],
