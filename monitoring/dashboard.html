@@ -92,9 +92,14 @@
       font-size: 11px;
       box-shadow: none;
     }
-    .marquee::before { content: "● LIVE FEED"; align-self: stretch; display: flex; align-items: center; padding: 0 12px; margin-right: 12px; background: var(--red); color: #fff; font-weight: 900; letter-spacing: 1.5px; }
-    .marquee div { white-space: nowrap; animation: roll 34s linear infinite; padding-left: 100%; }
-    @keyframes roll { to { transform: translateX(-180%); } }
+    /* 徽标需高于滚动层（track 的 transform 会创建新层叠上下文），且不被长文案挤压 */
+    .marquee::before { content: "● LIVE FEED"; align-self: stretch; display: flex; align-items: center; padding: 0 12px; margin-right: 12px; background: var(--red); color: #fff; font-weight: 900; letter-spacing: 1.5px; flex: 0 0 auto; position: relative; z-index: 1; }
+    /* 双副本无缝滚动：track 内放两份相同文案，位移自身宽度的一半正好衔接，
+       无空窗、无跳变；副本各自 min-width:100% 保证短文案时也铺满一屏。 */
+    .marquee .track { display: flex; white-space: nowrap; animation: roll 34s linear infinite; }
+    .marquee .track span { display: inline-block; min-width: 100%; padding-right: 48px; }
+    .marquee:hover .track { animation-play-state: paused; }
+    @keyframes roll { to { transform: translateX(-50%); } }
     .main-top { display: grid; grid-template-columns: 1fr 1.35fr 1fr 1fr; gap: 6px; min-height: 338px; }
     .main-bottom { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 6px; min-height: 630px; }
     .main-bottom > .panel:nth-child(2) { display: none; }
@@ -251,7 +256,7 @@
       </div>
       <div class="clock"><div id="utcTime" class="time">--:--:-- UTC</div><div id="conn" class="status">连接中</div></div>
     </header>
-    <div class="marquee"><div id="ticker">系统启动 // 等待真实行情 // 等待真实成交事件 // 轮询刷新已启用 //</div></div>
+    <div class="marquee"><div class="track"><span id="ticker">系统启动 // 等待真实行情 // 等待真实成交事件 // 轮询刷新已启用 //</span><span id="tickerDup" aria-hidden="true">系统启动 // 等待真实行情 // 等待真实成交事件 // 轮询刷新已启用 //</span></div></div>
 
     <section class="main-top">
       <div class="panel">
@@ -557,7 +562,7 @@
       $("footerFills").textContent = fmt.int(e.orders_filled_total);
       $("chartTitle").textContent = Array.isArray(live.candles) && live.candles.length ? `BTC/USDT · Binance 1分钟 · ${fmt.usd(live.candles[live.candles.length-1].close)}` : "BTC/USDT · 等待真实K线";
       $("chartChange").textContent = live.candles_updated_at ? String(live.candles_updated_at).slice(11,19) : "—";
-      $("ticker").textContent = [
+      const tickerText = [
         "实时信息",
         hasBtcSpot ? `BTC ${fmt.usd(btcSpot)}` : "等待 BTC 现货",
         `轮询样本 ${fmt.int(state.history.length)}`,
@@ -574,6 +579,11 @@
         `运行模式 ${live.mode === "live" ? "实盘" : "模拟"}`,
         "等待真实成交事件"
       ].join(" // ") + " //";
+      // 两份副本同步更新，保持无缝滚动衔接
+      if ($("ticker").textContent !== tickerText) {
+        $("ticker").textContent = tickerText;
+        $("tickerDup").textContent = tickerText;
+      }
       $("inFlight").textContent = fmt.int(e.open_positions);
       $("processed").textContent = fmt.int(f.fusion_num_signals || 0);
       $("filled").textContent = fmt.int(e.orders_filled_total);
