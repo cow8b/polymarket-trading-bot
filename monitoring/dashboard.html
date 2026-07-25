@@ -186,12 +186,13 @@
       padding: 5px 9px;
       text-transform: uppercase;
     }
+    /* 面板状态章：实心印章样式，与黑色表头带垂直对齐
+       （原半透明红底红字压在黑带上，对比度差且视觉偏位） */
     .live {
-      position: absolute; top: 7px; right: 7px;
-      color: var(--red); border: 1px solid rgba(217,60,77,.7); padding: 2px 7px; font-size: 10px; background: rgba(217,60,77,.08);
-      
+      position: absolute; top: 5px; right: 6px;
+      color: #fff; background: var(--red); border: 0;
+      padding: 2px 8px; font-size: 10px; letter-spacing: 1px; line-height: 1.4;
     }
-    @keyframes pulse { 50% { opacity: .38; box-shadow: 0 0 14px var(--green); } }
     .big-pnl { color: var(--green); font-size: 44px; font-weight: 900; line-height: .92; margin: 20px 0 12px; text-shadow: 1px 1px 0 rgba(0,0,0,.12); }
     .pnl-sub { color: var(--muted); font-size: 10px; margin-top: -4px; margin-bottom: 6px; }
     .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
@@ -209,7 +210,8 @@
     .chart-title { position: absolute; top: 8px; left: 10px; color: var(--muted); font-size: 11px; z-index: 1; }
     .chart-change { position: absolute; top: 8px; right: 10px; color: var(--green); font-size: 11px; z-index: 1; }
     .book { margin-top: 5px; font-size: 10px; display: grid; grid-template-columns: .72fr 1.28fr; gap: 5px; }
-    .price-stream { border: 1px solid rgba(22,19,15,.42); background: rgba(255,255,255,.22); padding: 4px; height: 105px; overflow: hidden; }
+    /* 高度自适应：原写死 105px 在字号提升后裁掉后三行说明 */
+    .price-stream { border: 1px solid rgba(22,19,15,.42); background: rgba(255,255,255,.22); padding: 5px 6px; height: auto; min-height: 105px; }
     .stream-line { padding: 1px 0; color: var(--muted); }
     .book-side { min-width: 0; }
     /* 列宽弹性化：原固定 258px 超出容器，金额列在面板右缘被裁 */
@@ -245,7 +247,8 @@
     .tree-counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 5px; }
     .tree-count { border: 0; background: transparent; padding: 2px 4px; font-size: 10px; color: #e7e0cf; text-align: right; }
     .tree-count b { color: #fff; display: inline; font-size: 11px; margin-left: 6px; text-shadow: none; }
-    .tree-wrap { display: grid; grid-template-columns: 130px 1fr 220px; gap: 8px; height: 520px; }
+    /* 552px 补偿 viewBox 加高（540→570）造成的整树缩放挤压 */
+    .tree-wrap { display: grid; grid-template-columns: 130px 1fr 220px; gap: 8px; height: 552px; }
     .legend { border: 1px solid rgba(22,19,15,.25); padding: 8px; height: max-content; margin-top: 42px; background: rgba(255,255,255,.2); }
     .legend div { margin: 5px 0; font-size: 11px; }
     /* 右栏"本轮指标"挂件与图例同语言：同边框同底色，替代裸表格 */
