@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from loguru import logger
+from nautilus_trader.adapters.polymarket.common.constants import POLYMARKET_VENUE
+from nautilus_trader.model.currencies import pUSD
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.enums import OrderSide, TimeInForce
 from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId
@@ -370,6 +372,10 @@ class IntegratedBTCStrategy(Strategy):
 
         # ── Supporting systems ────────────────────────────────────────────────
         self.risk_engine = get_risk_engine()
+        # Real-wallet balance sync state: last pUSD reading pushed into the
+        # risk engine, and the monotonic deadline for the next portfolio check.
+        self._risk_balance_last_synced: Optional[Decimal] = None
+        self._risk_balance_next_check: float = 0.0
         self.performance_tracker = get_performance_tracker()
         self.learning_engine = get_learning_engine()
         self.trade_history_repository = TradeHistoryRepository()
@@ -2062,6 +2068,10 @@ class IntegratedBTCStrategy(Strategy):
 
             now = datetime.now(timezone.utc)
 
+            # Push the real Polymarket USDC balance into the risk engine so
+            # drawdown / daily-loss limits track actual capital, not defaults.
+            self._sync_risk_engine_balance()
+
             # Heartbeat: report bot status every _heartbeat_secs so the user
             # can see it's alive and how long until the next trade window.
             self._emit_heartbeat(now)
@@ -2115,6 +2125,47 @@ class IntegratedBTCStrategy(Strategy):
                 await asyncio.sleep(1)
 
         logger.info("Timer loop stopped")
+
+    # ── Risk-engine balance sync ──────────────────────────────────────────────
+
+    def _sync_risk_engine_balance(self) -> None:
+        """
+        Mirror the real Polymarket USDC balance into the risk engine.
+
+        The Polymarket exec client reports the wallet's collateral balance as
+        an AccountState in ``pUSD``; without this sync the risk engine falls
+        back to the ``ACCOUNT_BALANCE_USD`` env default and its daily-loss /
+        drawdown gates are computed against fictional capital.
+
+        Only pushes when the wallet reading actually changed, so in paper mode
+        (constant wallet) the risk engine keeps tracking simulated P&L instead
+        of being reset every minute. Throttled to one portfolio read per 60s.
+        """
+        now_mono = time.monotonic()
+        if now_mono < self._risk_balance_next_check:
+            return
+        self._risk_balance_next_check = now_mono + 60.0
+        try:
+            account = self.portfolio.account(POLYMARKET_VENUE)
+            if account is None:
+                return
+            free = account.balance_free(pUSD)
+            if free is None:
+                return
+            balance = free.as_decimal()
+            if balance <= 0:
+                return
+            if balance == self._risk_balance_last_synced:
+                return
+            first_sync = self._risk_balance_last_synced is None
+            self.risk_engine.set_account_balance(balance, reset_peak=first_sync)
+            if first_sync:
+                # 首次拿到真实余额时同步重设绩效面板本金，使驾驶舱
+                # "账户权益"与 ROI 基于真实资金而非默认值。
+                self.performance_tracker.set_initial_capital(balance)
+            self._risk_balance_last_synced = balance
+        except Exception as e:
+            logger.debug(f"Risk balance sync skipped: {e}")
 
     # ── Quote tick handler ────────────────────────────────────────────────────
 

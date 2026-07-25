@@ -81,7 +81,7 @@ class RiskEngine:
     Risk management engine.
     
     Enforces:
-    - Position size limits (max $1 per trade)
+    - Position size limits (MAX_POSITION_USD per trade)
     - Portfolio exposure limits
     - Drawdown controls
     - Loss limits
@@ -196,7 +196,7 @@ class RiskEngine:
         Returns:
             (is_valid, error_message)
         """
-        # Check position size limit ($1 max)
+        # Check per-trade size limit (MAX_POSITION_USD)
         if size > self.limits.max_position_size:
             return False, f"Position size ${size} exceeds max ${self.limits.max_position_size}"
         
@@ -232,32 +232,36 @@ class RiskEngine:
         risk_percent: float = 0.02,
     ) -> Decimal:
         """
-        Calculate optimal position size with $1 cap.
-        
+        Calculate optimal position size, capped at ``limits.max_position_size``.
+
         Args:
             signal_confidence: Signal confidence (0.0-1.0)
             signal_score: Signal score (0-100)
             current_price: Current market price
             risk_percent: Percentage of capital to risk
-            
+
         Returns:
-            Position size in USD (capped at $1.00)
+            Position size in USD (floored at Polymarket's $1 minimum order,
+            capped at the configured per-trade limit)
         """
         # Base position size (% of capital)
         risk_amount = self._current_balance * Decimal(str(risk_percent))
-        
+
         # Scale by signal strength
         strength_multiplier = Decimal(str(signal_confidence)) * Decimal(str(signal_score / 100))
-        
+
         # Calculate position size
         position_size = risk_amount * strength_multiplier
-        
-        # ENFORCE $1 MAXIMUM
-        if position_size > Decimal("1.0"):
-            logger.info(f"Capping position size from ${float(position_size):.2f} to $1.00")
-            position_size = Decimal("1.0")
-        
-        # Ensure at least $1 (for simulation, in live you might want higher minimum)
+
+        # Cap at the configured per-trade limit (MAX_POSITION_USD).
+        if position_size > self.limits.max_position_size:
+            logger.info(
+                f"Capping position size from ${float(position_size):.2f} "
+                f"to ${self.limits.max_position_size}"
+            )
+            position_size = self.limits.max_position_size
+
+        # Polymarket's minimum order is $1.
         position_size = max(position_size, Decimal("1.0"))
         
         logger.info(

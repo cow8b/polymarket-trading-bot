@@ -21,12 +21,33 @@ get_daily_pnl(days)           → List[dict]
 export_for_grafana()          → dict
 """
 import asyncio
-from decimal import Decimal
+import os
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, field
 from collections import deque
 from loguru import logger
+
+
+def _initial_capital_from_env() -> Decimal:
+    """初始本金：优先读 ACCOUNT_BALANCE_USD / STARTING_BALANCE_USD。
+
+    与 execution/risk_engine.py 读同一组变量，避免驾驶舱"账户权益"与
+    风控余额基于两个不同的虚构数字。未配置时回退历史默认 $1000。
+    """
+    for name in ("ACCOUNT_BALANCE_USD", "STARTING_BALANCE_USD"):
+        raw = os.getenv(name)
+        if raw is None or not raw.strip():
+            continue
+        try:
+            value = Decimal(raw.strip())
+        except (InvalidOperation, ValueError):
+            logger.warning(f"Invalid {name}={raw!r}; ignoring")
+            continue
+        if value > 0:
+            return value
+    return Decimal("1000.0")
 
 
 @dataclass
@@ -88,7 +109,9 @@ class PerformanceTracker:
     All monetary amounts are in USD (Decimal for precision).
     """
 
-    def __init__(self, initial_capital: Decimal = Decimal("1000.0")):
+    def __init__(self, initial_capital: Optional[Decimal] = None):
+        if initial_capital is None:
+            initial_capital = _initial_capital_from_env()
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
 
@@ -107,6 +130,26 @@ class PerformanceTracker:
 
         self._start_time = datetime.now(timezone.utc)
         logger.info(f"Initialized Performance Tracker (capital=${initial_capital})")
+
+    def set_initial_capital(self, capital: Decimal) -> None:
+        """用真实钱包余额重设本金基准，保留已记录的盈亏偏移。
+
+        由 bot/strategy.py 在首次同步到 Polymarket 钱包余额时调用，使
+        ROI / 回撤 / 权益曲线基于真实本金而非默认值。
+        """
+        try:
+            cap = Decimal(str(capital))
+        except (InvalidOperation, ValueError):
+            logger.warning(f"set_initial_capital: invalid value {capital!r}")
+            return
+        if cap <= 0 or cap == self.initial_capital:
+            return
+        delta = cap - self.initial_capital
+        self.initial_capital = cap
+        self.current_capital += delta
+        self._peak_capital += delta
+        self._metrics_dirty = True
+        logger.info(f"Performance tracker capital rebased to ${cap:.2f}")
 
     # ──────────────────────────────────────────────────────────────────────────
     # Trade recording
