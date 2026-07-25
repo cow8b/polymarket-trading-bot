@@ -101,6 +101,14 @@
     .marquee .track span { display: inline-block; min-width: 100%; padding-right: 48px; }
     .marquee:hover .track { animation-play-state: paused; }
     @keyframes roll { to { transform: translateX(-50%); } }
+    /* 子系统健康条：状态用图标+文字双通道表达，不依赖颜色单独传义 */
+    .sysbar { display: flex; gap: 5px; flex-wrap: wrap; margin: 0 0 6px; }
+    .sys-chip { border: 1px solid rgba(22,19,15,.45); background: #f4ecd9; color: #17140f;
+      font-size: 9px; letter-spacing: 1px; padding: 2px 8px; white-space: nowrap; }
+    .sys-chip b { font-weight: 900; margin-right: 4px; }
+    .sys-chip.ok b { color: var(--green); }
+    .sys-chip.bad b { color: var(--red); }
+    .sys-chip.warn b { color: #8a6d00; }
     .main-top { display: grid; grid-template-columns: 1fr 1.35fr 1fr 1fr; gap: 6px; min-height: 338px; }
     .main-bottom { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 6px; min-height: 630px; }
     .main-bottom > .panel:nth-child(2) { display: none; }
@@ -259,11 +267,12 @@
       <div class="price-strip">
         <div class="price-card"><div class="k">BTC 现货</div><div id="btcSpot" class="v">等待数据</div><div class="chg">真实行情</div></div>
         <div class="price-card"><div class="k">ETH 现货</div><div id="ethSpot" class="v">$--</div><div class="chg">真实行情</div></div>
-        <div class="price-card"><div class="k">模型上涨概率</div><div id="mlHead" class="v">0.0%</div><div class="chg">策略概率</div></div>
+        <div class="price-card"><div class="k">模型上涨概率</div><div id="mlHead" class="v">0.0%</div><div id="mlSub" class="chg">策略概率</div></div>
       </div>
       <div class="clock"><div id="utcTime" class="time">--:--:-- UTC</div><div id="conn" class="status">连接中</div></div>
     </header>
     <div class="marquee"><div class="track"><span id="ticker">系统启动 // 等待真实行情 // 等待真实成交事件 // 轮询刷新已启用 //</span><span id="tickerDup" aria-hidden="true">系统启动 // 等待真实行情 // 等待真实成交事件 // 轮询刷新已启用 //</span></div></div>
+    <div class="sysbar" id="sysbar"><span class="sys-chip"><b>◌</b> 等待子系统状态</span></div>
 
     <section class="main-top">
       <div class="panel">
@@ -540,7 +549,44 @@
       const hasBtcSpot = hasValue(btcSpot);
       $("btcSpot").textContent = hasBtcSpot ? fmt.usd(btcSpot) : "等待数据";
       $("ethSpot").textContent = hasValue(live.eth_price) ? fmt.usd(live.eth_price) : "等待数据";
-      $("mlHead").textContent = fmt.pct((f.ml_prediction || 0) * 100);
+      // ML 未激活时明示训练进度，避免 0.00% 被误读为真实预测
+      if (live.ml_active) {
+        $("mlHead").textContent = fmt.pct((f.ml_prediction || 0) * 100);
+        $("mlSub").textContent = "策略概率";
+      } else {
+        $("mlHead").textContent = "未激活";
+        $("mlSub").textContent = `训练样本 ${fmt.int(live.ml_samples)}/${fmt.int(live.ml_min_samples || 200)}`;
+      }
+      // 子系统健康条：行情/盘口新鲜度 + 结算源/记录器/ML 状态
+      const nowMs = Date.now();
+      const ageOf = iso => iso ? (nowMs - new Date(iso).getTime()) / 1000 : Infinity;
+      const quoteAge = Math.min(ageOf(live.quote_updated_at), ageOf(live.candles_updated_at));
+      const obAge = ageOf(live.orderbook_updated_at);
+      const chips = [
+        quoteAge <= 10
+          ? { cls: "ok", icon: "●", label: "行情流", text: "实时" }
+          : quoteAge <= 60
+            ? { cls: "warn", icon: "◌", label: "行情流", text: `${Math.round(quoteAge)}s 前` }
+            : { cls: "bad", icon: "✕", label: "行情流", text: quoteAge === Infinity ? "等待" : "中断" },
+        obAge <= 10
+          ? { cls: "ok", icon: "●", label: "盘口", text: "实时" }
+          : { cls: live.market_data_error ? "bad" : "warn", icon: live.market_data_error ? "✕" : "◌",
+              label: "盘口", text: live.market_data_error ? "异常" : "等待", title: live.market_data_error || "" },
+        live.rpc_ok
+          ? { cls: "ok", icon: "●", label: "结算源", text: live.rpc_label || "已连接" }
+          : { cls: "warn", icon: "◌", label: "结算源", text: "未配置" },
+        live.settlement_running
+          ? { cls: "ok", icon: "●", label: "信号记录", text: "运行中" }
+          : { cls: "bad", icon: "✕", label: "信号记录", text: "已停止" },
+        live.ml_active
+          ? { cls: "ok", icon: "●", label: "ML", text: "已激活" }
+          : { cls: "warn", icon: "◌", label: "ML", text: `训练中 ${fmt.int(live.ml_samples)}/${fmt.int(live.ml_min_samples || 200)}` },
+        { cls: live.mode === "live" ? "bad" : "ok", icon: live.mode === "live" ? "▲" : "●",
+          label: "模式", text: live.mode === "live" ? "实盘" : "模拟" },
+      ];
+      $("sysbar").innerHTML = chips.map(c =>
+        `<span class="sys-chip ${c.cls}"${c.title ? ` title="${c.title.replace(/"/g, "&quot;")}"` : ""}><b>${c.icon}</b>${c.label} ${c.text}</span>`
+      ).join("");
       $("totalPnl").textContent = fmt.usd(p.total_pnl);
       $("totalPnl").className = "big-pnl " + (p.total_pnl >= 0 ? "green" : "red");
       $("pnlSub").textContent = `账户权益 ${fmt.usd(p.current_capital)} · 已实现 ${p.total_pnl >= 0 ? "+" : ""}${fmt.usd(p.total_pnl)} · 未实现 ${fmt.usd(p.unrealized_pnl)}`;
@@ -697,7 +743,15 @@
       $("footerPnl").textContent = fmt.usd(p.total_pnl);
       $("footerPnl").className = p.total_pnl >= 0 ? "green" : "red";
       $("footerAccount").textContent = `${live.mode === "live" ? "实盘" : "模拟"}账本 · ${fmt.int(live.completed_trades || 0)} 笔已平仓`;
-      document.querySelector(".scan-head span:first-child").textContent = period;
+      // 时段后附结算倒计时（15 分钟市场的核心信息）
+      let settleTxt = "";
+      if (live.market_end) {
+        const remain = Math.round((new Date(live.market_end).getTime() - Date.now()) / 1000);
+        settleTxt = remain > 0
+          ? ` · 距结算 ${Math.floor(remain / 60)}:${String(remain % 60).padStart(2, "0")}`
+          : " · 结算中";
+      }
+      document.querySelector(".scan-head span:first-child").textContent = period + settleTxt;
       renderPositions(s);
       renderBook(s);
       renderLogs(s);
