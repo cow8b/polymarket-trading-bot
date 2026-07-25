@@ -257,7 +257,7 @@
     .analytics-label { height: 26px; display: flex; justify-content: space-between; align-items: center; padding: 3px 7px; color: var(--muted); font-size: 8px; letter-spacing: 1px; }
     .analytics-label b { color: var(--green); font-size: 11px; }
     .analytics-cell canvas { width: 100%; height: 79px; }
-    .logs { flex: 1; height: auto; min-height: 231px; background: rgba(255,255,255,.2); border: 1px solid rgba(22,19,15,.42); padding: 5px; font-size: 8px; line-height: 1.22; }
+    .logs { flex: 1; height: auto; min-height: 231px; background: rgba(255,255,255,.2); border: 1px solid rgba(22,19,15,.42); padding: 6px; font-size: 11px; line-height: 1.4; }
     .log-line { padding: 1px 0; color: var(--muted); }
     .log-line b { color: var(--yellow); }
     .log-line .buy { color: var(--green); } .log-line .sell { color: var(--red); }
@@ -462,6 +462,9 @@
     function hasValue(v) {
       return Number.isFinite(Number(v)) && Number(v) !== 0;
     }
+    // 交易所返回的自由文本（如拒单原因）进 innerHTML 前必须转义
+    const escHtml = s => String(s).replace(/[&<>"']/g,
+      c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
     function utcClock() {
       const d = new Date();
       $("utcTime").textContent = d.toISOString().slice(11, 19) + " UTC";
@@ -496,27 +499,27 @@
         });
         // 历史序列增量维护：首次与每 30 秒全量校准一次（防漂移），
         // 其余轮询直接用本次 snapshot 在本地追加，避免每秒重拉约 2.4MB 全量历史。
-        const needHistSync = !state.histSyncedAt || (Date.now() - state.histSyncedAt > 30000);
-        if (needHistSync) {
-          // 首次全量；之后带 since 只取增量。失败也写退避时间戳，
-          // 避免掉进"每秒重试全量 1MB 请求"的循环。
-          const lastTs = state.history?.[state.history.length - 1]?.ts;
-          const url = lastTs
-            ? `/api/dashboard/history?limit=600&since=${encodeURIComponent(lastTs)}`
-            : "/api/dashboard/history?limit=600";
+        // 历史序列：本地按秒追加为主，每 5 分钟做一次"真全量"替换以校准
+        // 漂移（此前的 since 增量因本地点时间戳恒新于服务端点，实际取不
+        // 回任何数据，校准形同虚设）。首次加载失败每 10 秒重试全量，
+        // 避免用本地点的 since 把服务端存量历史永久挡在门外。
+        const FULL_SYNC_MS = 300000;
+        const needFullSync = !state.histFullLoaded
+          || (Date.now() - (state.histSyncedAt || 0) > FULL_SYNC_MS);
+        if (needFullSync) {
           try {
-            const hist = await fetchApi(url, 3000).then(r => r.ok ? r.json() : null);
+            const hist = await fetchApi("/api/dashboard/history?limit=600", 3000)
+              .then(r => r.ok ? r.json() : null);
             if (hist) {
-              const pts = hist.points || [];
-              state.history = lastTs ? state.history.concat(pts) : pts;
-              if (state.history.length > 600) state.history.splice(0, state.history.length - 600);
+              state.history = hist.points || [];
+              state.histFullLoaded = true;
               state.histSyncedAt = Date.now();
             } else {
-              state.histSyncedAt = Date.now() - 20000;
+              state.histSyncedAt = Date.now() - FULL_SYNC_MS + 10000;
             }
           } catch (_) {
             state.history = state.history || [];
-            state.histSyncedAt = Date.now() - 20000;
+            state.histSyncedAt = Date.now() - FULL_SYNC_MS + 10000;
           }
         } else {
           appendHistoryPoint(snap);
@@ -891,7 +894,9 @@
       const logsEl = $("logs");
       // 内容未变化时不重建 DOM：保留滚动位置与用户的文本选中
       const last = events[events.length - 1];
-      const logSignature = `${events.length}:${last?.ts || ""}:${last?.type || ""}`;
+      // 签名纳入 sequence/trade_id：仅靠 length+ts 在 80 条上限后可能漏渲染
+      const logSignature = `${events.length}:${last?.ts || ""}:${last?.type || ""}`
+        + `:${last?.sequence ?? ""}:${last?.payload?.trade_id ?? ""}`;
       if (state.lastLogSignature === logSignature) return;
       state.lastLogSignature = logSignature;
       const logsAtBottom =
@@ -923,7 +928,7 @@
           hasValue(p.size_usd) ? `金额 ${fmt.usd(p.size_usd)}` : "",
           hasValue(p.notional_usd) ? `成交额 ${fmt.usd(p.notional_usd)}` : "",
           Number.isFinite(Number(p.realized_pnl)) ? `收益 ${fmt.usd(p.realized_pnl)}` : "",
-          p.reason ? `原因 ${p.reason}` : "",
+          p.reason ? `原因 ${escHtml(p.reason)}` : "",
           type === "history_pending" ? "重启后仅供复盘，不作为活动持仓" : "",
         ].filter(Boolean).join(" · ");
         return `<div class="log-line"><b>${ts}</b> <span class="${cls}">${eventName(type)}</span>${details ? " · " + details : ""}</div>`;
@@ -962,23 +967,27 @@
       const decisionAgeMs = Date.now() - (Date.parse(decision.updated_at || "") || 0);
       const decisionStale = Boolean(decision.updated_at) && decisionAgeMs > 20000 && !decision.current_stage;
       if (!stages.length || decisionStale) {
+        // 待命/过期分支必须无条件 return：行情脉冲缺失（恰恰是最容易
+        // 出现陈旧决策的场景）时也不能穿透到下面把旧 stages 重新点亮
         const hasMarketPulse = Boolean(
           live.quote_updated_at || live.orderbook_updated_at || live.candles_updated_at
         );
         if (hasMarketPulse) {
           ["nodeQuote", "nodeMarket", "nodeHistory"].forEach(id => $(id)?.classList.add("active"));
           ["e1", "e2"].forEach(id => $(id)?.classList.add("active"));
-          const mode = $("treeMode");
-          if (mode) {
-            const waitingText = live.trade_window_open
-              ? "模拟扫描 · 交易窗口打开"
-              : `模拟扫描 · ${live.next_window || "等待交易窗口"}`;
-            mode.textContent = live.mode === "live" ? "实盘扫描 · 等待策略触发" : waitingText;
-            mode.className = "tree-mode";
-          }
-          syncFlowEffects(flowPnls.length ? flowPnls : [0]);
-          return;
         }
+        const mode = $("treeMode");
+        if (mode) {
+          const waitingText = live.trade_window_open
+            ? "模拟扫描 · 交易窗口打开"
+            : `模拟扫描 · ${live.next_window || "等待交易窗口"}`;
+          mode.textContent = !hasMarketPulse
+            ? "待命 · 等待行情"
+            : (live.mode === "live" ? "实盘扫描 · 等待策略触发" : waitingText);
+          mode.className = "tree-mode";
+        }
+        syncFlowEffects(flowPnls.length ? flowPnls : [0]);
+        return;
       }
       stages.forEach(item => {
         const target = map[item.stage];

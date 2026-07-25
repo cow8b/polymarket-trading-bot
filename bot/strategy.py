@@ -1637,6 +1637,25 @@ class IntegratedBTCStrategy(Strategy):
                     max_drawdown_pct,
                     (peak_balance - running_balance) / peak_balance * 100,
                 )
+        # 全量口径的账本聚合：trade_history 只截最近 200 笔限制 payload，
+        # 期望/盈利因子/平均持仓若由 exporter 从切片重算，超过 200 笔后会
+        # 与全量口径的胜率/收益自相矛盾，因此在这里按全量算好下发。
+        pnls_settled = [float(t.pnl_usd) for t in settled]
+        gross_win = sum(p for p in pnls_settled if p > 0)
+        gross_loss = -sum(p for p in pnls_settled if p < 0)
+        ledger_expectancy = (sum(pnls_settled) / len(pnls_settled)) if pnls_settled else 0.0
+        ledger_profit_factor = (
+            gross_win / gross_loss if gross_loss > 1e-9
+            else (99.99 if gross_win > 0 else 0.0)
+        )
+        # 仅统计确有平仓时间的交易，历史遗留行（无 closed_at）不拉低均值
+        hold_samples = [
+            (t.closed_at - t.timestamp).total_seconds()
+            for t in settled
+            if getattr(t, "closed_at", None)
+        ]
+        ledger_avg_hold = (sum(hold_samples) / len(hold_samples)) if hold_samples else 0.0
+
         trade_history = []
         for trade in all_trades[-200:]:
             row = trade.to_dict()
@@ -1706,6 +1725,10 @@ class IntegratedBTCStrategy(Strategy):
             "wallet_balance": wallet_balance,
             "trade_history": trade_history,
             "drawdown_pct": max_drawdown_pct,
+            "peak_balance": peak_balance,
+            "ledger_expectancy_usd": ledger_expectancy,
+            "ledger_profit_factor": ledger_profit_factor,
+            "ledger_avg_hold_seconds": ledger_avg_hold,
             "bot_start": bot_start,
         }
 
@@ -2568,10 +2591,14 @@ class IntegratedBTCStrategy(Strategy):
                         direction=_dir,
                         metadata=sig.metadata or {},
                     )
-                # 无论处理器是否触发信号，都推送一次市场指标——否则驾驶舱
-                # 的 RSI/资金费率/CVD/恐惧贪婪四格只有在对应处理器开火时
-                # 才有值，绝大多数时间显示为空。
-                ohlcv = self.ohlcv_momentum_processor._fetch_klines() or {}
+            except Exception:
+                pass
+            # 无论处理器是否触发信号，都推送一次市场指标——否则驾驶舱的
+            # RSI/资金费率/CVD/恐惧贪婪四格只有在对应处理器开火时才有值。
+            # 独立 try：单个 signal 的异常不应吞掉指标推送；只读处理器的
+            # K 线缓存（不主动拉取），Binance 故障时不产生额外阻塞请求。
+            try:
+                ohlcv = self.ohlcv_momentum_processor._cached_klines or {}
                 self.grafana_exporter.update_market_indicators(
                     rsi=ohlcv.get("rsi"),
                     macd_histogram=(
@@ -3779,7 +3806,7 @@ class IntegratedBTCStrategy(Strategy):
             logger.error(f"Error placing real order: {e}")
             import traceback
             traceback.print_exc()
-            self._track_order_event("rejected")
+            self._track_order_event("rejected", reason=str(e)[:160])
 
     # ── Signal processing ─────────────────────────────────────────────────────
 

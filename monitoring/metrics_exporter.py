@@ -833,7 +833,7 @@ class GrafanaMetricsExporter:
         ``since``（ISO 时间戳）只返回该时刻之后的增量点，供前端周期性
         校准时避免每次全量传输。
         """
-        limit = max(1, min(limit, self.HISTORY_LIMIT_CAP))
+        limit = max(1, min(limit, self._history.maxlen or self.HISTORY_LIMIT_CAP, self.HISTORY_LIMIT_CAP))
         with self._history_lock:
             points = list(self._history)
         if since:
@@ -1109,34 +1109,54 @@ class GrafanaMetricsExporter:
             # 回撤/期望/盈利因子/平均持仓与收益同源：全部改用账本数据。
             # 内存版 PerformanceTracker 重启即清零，否则会出现"胜率 62% 但
             # 期望 $0.00、盈利因子 0.00"的自相矛盾展示。
-            snapshot["risk"]["max_drawdown"] = float(
-                live_state.get("drawdown_pct", 0.0) or 0.0
-            )
-            settled_rows = [
-                r for r in history_rows
-                if r.get("outcome") in ("WIN", "LOSS", "BREAKEVEN")
-            ]
-            pnls = [float(r.get("pnl_usd", 0.0) or 0.0) for r in settled_rows]
-            if pnls:
-                gross_win = sum(x for x in pnls if x > 0)
-                gross_loss = -sum(x for x in pnls if x < 0)
-                snapshot["trade_stats"]["expectancy_usd"] = sum(pnls) / len(pnls)
-                snapshot["trade_stats"]["profit_factor"] = (
-                    gross_win / gross_loss if gross_loss > 1e-9
-                    else (99.99 if gross_win > 0 else 0.0)
+            drawdown_pct = float(live_state.get("drawdown_pct", 0.0) or 0.0)
+            snapshot["risk"]["max_drawdown"] = drawdown_pct
+            peak_balance = float(live_state.get("peak_balance", 0.0) or 0.0)
+            if peak_balance > 0:
+                # 同面板的 USD 口径与峰值也对齐账本，避免"回撤 8.3% /
+                # 回撤金额 $0.00"的半新半旧展示
+                snapshot["risk"]["peak_capital"] = peak_balance
+                snapshot["risk"]["max_drawdown_usd"] = drawdown_pct / 100.0 * peak_balance
+            if "ledger_expectancy_usd" in live_state:
+                # 策略侧按全量账本算好的聚合值（trade_history 只截 200 笔，
+                # 从切片重算会与全量口径的胜率/收益矛盾）
+                snapshot["trade_stats"]["expectancy_usd"] = float(
+                    live_state.get("ledger_expectancy_usd", 0.0) or 0.0
                 )
-                holds = []
-                for r in settled_rows:
-                    try:
-                        opened = datetime.fromisoformat(str(r.get("timestamp")))
-                        closed = datetime.fromisoformat(
-                            str(r.get("closed_at") or r.get("timestamp"))
-                        )
-                        holds.append(max(0.0, (closed - opened).total_seconds()))
-                    except (TypeError, ValueError):
-                        continue
-                if holds:
-                    snapshot["trade_stats"]["avg_hold_seconds"] = sum(holds) / len(holds)
+                snapshot["trade_stats"]["profit_factor"] = float(
+                    live_state.get("ledger_profit_factor", 0.0) or 0.0
+                )
+                snapshot["trade_stats"]["avg_hold_seconds"] = float(
+                    live_state.get("ledger_avg_hold_seconds", 0.0) or 0.0
+                )
+            else:
+                # 旧版策略快照的回退路径：从 200 笔切片重算
+                settled_rows = [
+                    r for r in history_rows
+                    if r.get("outcome") in ("WIN", "LOSS", "BREAKEVEN")
+                ]
+                pnls = [float(r.get("pnl_usd", 0.0) or 0.0) for r in settled_rows]
+                if pnls:
+                    gross_win = sum(x for x in pnls if x > 0)
+                    gross_loss = -sum(x for x in pnls if x < 0)
+                    snapshot["trade_stats"]["expectancy_usd"] = sum(pnls) / len(pnls)
+                    snapshot["trade_stats"]["profit_factor"] = (
+                        gross_win / gross_loss if gross_loss > 1e-9
+                        else (99.99 if gross_win > 0 else 0.0)
+                    )
+                    holds = []
+                    for r in settled_rows:
+                        closed_raw = r.get("closed_at")
+                        if not closed_raw:
+                            continue  # 历史遗留行无平仓时间，不计入分母
+                        try:
+                            opened = datetime.fromisoformat(str(r.get("timestamp")))
+                            closed = datetime.fromisoformat(str(closed_raw))
+                            holds.append(max(0.0, (closed - opened).total_seconds()))
+                        except (TypeError, ValueError):
+                            continue
+                    if holds:
+                        snapshot["trade_stats"]["avg_hold_seconds"] = sum(holds) / len(holds)
         return snapshot
 
     # ──────────────────────────────────────────────────────────────────────────
