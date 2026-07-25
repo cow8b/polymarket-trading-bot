@@ -1052,22 +1052,34 @@
       const c=$(canvas),ctx=c.getContext("2d"),r=c.getBoundingClientRect(),dpr=devicePixelRatio||1;c.width=r.width*dpr;c.height=r.height*dpr;ctx.scale(dpr,dpr);ctx.clearRect(0,0,r.width,r.height);
       let data = candlesData;
       ctx.fillStyle="#f3eddd";ctx.fillRect(0,0,r.width,r.height);
-      ctx.strokeStyle="rgba(22,19,15,.14)";ctx.setLineDash([4,5]);ctx.lineWidth=1;for(let i=0;i<6;i++){const y=12+i*(r.height-24)/5;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(r.width,y);ctx.stroke();}for(let i=0;i<7;i++){const x=8+i*(r.width-16)/6;ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,r.height);ctx.stroke();}ctx.setLineDash([]);
+      // 布局：顶部 24px 留给 HTML 标题/更新时间；右侧 64px 价格标签栏；
+      // K 线只画在绘图区内，避免与覆盖层文字重叠。
+      const padT=24, padB=12, padX=8, gutter=64;
+      const plotW=r.width-padX-gutter, plotH=r.height-padT-padB;
+      ctx.strokeStyle="rgba(22,19,15,.14)";ctx.setLineDash([4,5]);ctx.lineWidth=1;
+      for(let i=0;i<6;i++){const y=padT+i*plotH/5;ctx.beginPath();ctx.moveTo(padX,y);ctx.lineTo(r.width-8,y);ctx.stroke();}
+      for(let i=0;i<7;i++){const x=padX+i*plotW/6;ctx.beginPath();ctx.moveTo(x,padT);ctx.lineTo(x,r.height-padB);ctx.stroke();}
+      ctx.setLineDash([]);
       if(data.length < 2){
-        ctx.fillStyle="rgba(105,100,90,.9)";ctx.font="10px monospace";ctx.fillText(placeholder ? "等待真实 BTC 现货历史" : "真实样本不足",10,18);
+        ctx.fillStyle="rgba(105,100,90,.9)";ctx.font="10px monospace";ctx.textAlign="center";
+        ctx.fillText(placeholder ? "等待真实 BTC 现货历史" : "真实样本不足", r.width/2, r.height/2);
+        ctx.textAlign="left";
         return;
       }
       const all = data.flatMap(x => [x.open, x.high, x.low, x.close]);
-      const min=Math.min(...all),max=Math.max(...all),span=Math.max(.001,max-min),w=r.width/data.length;
-      const yOf = v => r.height-16-((v-min)/span)*(r.height-30);
+      const min=Math.min(...all),max=Math.max(...all),span=Math.max(.001,max-min),w=plotW/data.length;
+      const yOf = v => r.height-padB-((v-min)/span)*plotH;
       data.forEach((bar,i)=>{
-        const up=bar.close>=bar.open, x=i*w+w*.22, mid=x+w*.28, yOpen=yOf(bar.open), yClose=yOf(bar.close), yHigh=yOf(bar.high), yLow=yOf(bar.low);
+        const up=bar.close>=bar.open, x=padX+i*w+w*.22, mid=x+w*.28, yOpen=yOf(bar.open), yClose=yOf(bar.close), yHigh=yOf(bar.high), yLow=yOf(bar.low);
         ctx.strokeStyle=up?"#168c55":"#d93c4d";ctx.fillStyle=ctx.strokeStyle;ctx.lineWidth=1.4;
         ctx.beginPath();ctx.moveTo(mid,yHigh);ctx.lineTo(mid,yLow);ctx.stroke();
         ctx.fillRect(x,Math.min(yOpen,yClose),Math.max(3,w*.52),Math.max(3,Math.abs(yClose-yOpen)));
       });
-      ctx.fillStyle="#2b2923";ctx.font="10px monospace";ctx.fillText(`H ${fmt.num(max, 2)}`,r.width-82,16);ctx.fillText(`L ${fmt.num(min, 2)}`,r.width-82,r.height-10);
-      if(placeholder){ctx.fillStyle="rgba(105,100,90,.9)";ctx.font="10px monospace";ctx.fillText("等待真实 BTC 现货历史",10,18);}
+      // H/L 标签右对齐锚定在各自价位线上（价格轴样式），不会与蜡烛或标题重叠
+      ctx.fillStyle="#2b2923";ctx.font="10px monospace";ctx.textAlign="right";
+      ctx.fillText(`H ${fmt.num(max, 2)}`, r.width-8, yOf(max)+3);
+      ctx.fillText(`L ${fmt.num(min, 2)}`, r.width-8, yOf(min)+3);
+      ctx.textAlign="left";
     }
     function drawAll(s) {
       const live = s.live_state || {};
