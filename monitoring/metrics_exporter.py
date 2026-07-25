@@ -171,8 +171,9 @@ class MetricsHandler(BaseHTTPRequestHandler):
                 limit = int(query.get("limit", ["600"])[0])
             except (TypeError, ValueError):
                 limit = 600
+            since = (query.get("since", [""])[0] or "").strip()
             body = json.dumps(
-                self.exporter.dashboard_history(limit=limit),
+                self.exporter.dashboard_history(limit=limit, since=since),
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -793,11 +794,22 @@ class GrafanaMetricsExporter:
         metrics = self._collect_metric_samples()
         return self._snapshot_from_metrics(metrics)
 
-    def dashboard_history(self, limit: int = 600) -> Dict[str, Any]:
-        """Return recent in-memory dashboard samples for browser time-series charts."""
-        limit = max(1, min(limit, self._history.maxlen or 600))
+    # 单次响应的采样点硬上限：3600 点全量约 7MB 的 json.dumps 会在交易
+    # 进程内持 GIL 上百毫秒，拖累 asyncio 事件循环。
+    HISTORY_LIMIT_CAP = 600
+
+    def dashboard_history(self, limit: int = 600, since: str = "") -> Dict[str, Any]:
+        """Return recent in-memory dashboard samples for browser time-series charts.
+
+        ``since``（ISO 时间戳）只返回该时刻之后的增量点，供前端周期性
+        校准时避免每次全量传输。
+        """
+        limit = max(1, min(limit, self.HISTORY_LIMIT_CAP))
         with self._history_lock:
-            points = list(self._history)[-limit:]
+            points = list(self._history)
+        if since:
+            points = [p for p in points if str(p.get("ts") or "") > since]
+        points = points[-limit:]
         snapshot = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "points": points,

@@ -25,7 +25,8 @@
         radial-gradient(circle at 50% -20%, rgba(255,255,255,.85), transparent 34rem),
         linear-gradient(180deg, #f7f1df, #e7decc);
       font-family: "Share Tech Mono", "Roboto Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      overflow-x: hidden;
+      /* 布局最小宽度 1180px；窄屏（手机/分屏）依赖横向滚动查看右侧面板 */
+      overflow-x: auto;
     }
     body::before {
       content: "";
@@ -141,7 +142,7 @@
     .riskbar span { display: block; height: 100%; background: linear-gradient(90deg, var(--yellow), var(--red)); }
     canvas { width: 100%; height: 100%; display: block; }
     .chartbox { height: 190px; border: 1px solid rgba(22,19,15,.55); background: #f3eddd; padding: 4px; position: relative; }
-    .chartbox #tvKline, .chartbox #kline { position: absolute; inset: 4px; width: calc(100% - 8px); height: calc(100% - 8px); }
+    .chartbox #kline { position: absolute; inset: 4px; width: calc(100% - 8px); height: calc(100% - 8px); }
     .chart-title { position: absolute; top: 8px; left: 10px; color: var(--muted); font-size: 11px; z-index: 1; }
     .chart-change { position: absolute; top: 8px; right: 10px; color: var(--green); font-size: 11px; z-index: 1; }
     .book { margin-top: 5px; font-size: 9px; display: grid; grid-template-columns: .72fr 1.28fr; gap: 5px; }
@@ -255,9 +256,9 @@
     .log-line { padding: 1px 0; color: var(--muted); }
     .log-line b { color: var(--yellow); }
     .log-line .buy { color: var(--green); } .log-line .sell { color: var(--red); }
-    @media (max-width: 1500px) {
-      .shell { transform: scale(.86); transform-origin: top left; width: 116%; }
-    }
+    /* 窄屏改为允许横向滚动（原 scale 缩放不改变布局盒高度，
+       会在页面底部留下约 14% 的恒定空白，且配合 overflow-x:hidden
+       让手机端右侧 2/3 内容永久不可达） */
   </style>
 </head>
 <body>
@@ -284,12 +285,12 @@
           <div class="metric"><div class="k">总成交</div><div id="fills" class="v">0</div></div>
           <div class="metric"><div class="k">胜率</div><div id="winRate" class="v green">0.00%</div></div>
           <div class="metric"><div class="k">当前预测优势</div><div id="edge" class="v yellow" title="通过风控的最近一笔信号，按可成交价计算；未扣手续费和额外滑点">—</div></div>
-          <div class="metric"><div class="k">回撤风险 <span class="yellow">注意</span></div><div id="ddRisk" class="v yellow">0.0/10</div><div class="riskbar"><span id="ddBar" style="width:0%"></span></div></div>
+          <div class="metric"><div class="k">回撤风险 <span id="ddBadge" class="green">正常</span></div><div id="ddRisk" class="v green">0.0/10</div><div class="riskbar"><span id="ddBar" style="width:0%"></span></div></div>
         </div>
       </div>
       <div class="panel">
         <h2>价格走势与盘口流</h2>
-        <div class="chartbox"><div id="chartTitle" class="chart-title">BTC / 美元 · 等待真实报价</div><div id="chartChange" class="chart-change">—</div><div id="tvKline" style="width:100%;height:100%"></div><canvas id="kline" style="display:none"></canvas></div>
+        <div class="chartbox"><div id="chartTitle" class="chart-title">BTC / 美元 · 等待真实报价</div><div id="chartChange" class="chart-change">—</div><canvas id="kline"></canvas></div>
         <div id="book" class="book"></div>
       </div>
       <div class="panel">
@@ -446,7 +447,7 @@
     const API_BASE = (apiOverride || (location.protocol.startsWith("http") && location.port === "8000" ? location.origin : "http://127.0.0.1:8000")).replace(/\/$/, "");
     const apiUrl = path => `${API_BASE}${path}`;
     const state = {
-      history: [], failures: 0, scanTick: 0, spreadSeries: [], lastError: "",
+      history: [], failures: 0, lastError: "",
       lastFocusSequence: null, polling: false, everConnected: false, pollTimer: null,
     };
     function hasValue(v) {
@@ -486,14 +487,27 @@
         });
         // 历史序列增量维护：首次与每 30 秒全量校准一次（防漂移），
         // 其余轮询直接用本次 snapshot 在本地追加，避免每秒重拉约 2.4MB 全量历史。
-        const needFullHistory = !state.histSyncedAt || (Date.now() - state.histSyncedAt > 30000);
-        if (needFullHistory) {
+        const needHistSync = !state.histSyncedAt || (Date.now() - state.histSyncedAt > 30000);
+        if (needHistSync) {
+          // 首次全量；之后带 since 只取增量。失败也写退避时间戳，
+          // 避免掉进"每秒重试全量 1MB 请求"的循环。
+          const lastTs = state.history?.[state.history.length - 1]?.ts;
+          const url = lastTs
+            ? `/api/dashboard/history?limit=600&since=${encodeURIComponent(lastTs)}`
+            : "/api/dashboard/history?limit=600";
           try {
-            const hist = await fetchApi("/api/dashboard/history?limit=600", 3000).then(r => r.ok ? r.json() : {points: []});
-            state.history = hist.points || [];
-            state.histSyncedAt = Date.now();
+            const hist = await fetchApi(url, 3000).then(r => r.ok ? r.json() : null);
+            if (hist) {
+              const pts = hist.points || [];
+              state.history = lastTs ? state.history.concat(pts) : pts;
+              if (state.history.length > 600) state.history.splice(0, state.history.length - 600);
+              state.histSyncedAt = Date.now();
+            } else {
+              state.histSyncedAt = Date.now() - 20000;
+            }
           } catch (_) {
             state.history = state.history || [];
+            state.histSyncedAt = Date.now() - 20000;
           }
         } else {
           appendHistoryPoint(snap);
@@ -537,12 +551,15 @@
       } finally {
         state.polling = false;
         clearTimeout(state.pollTimer);
-        state.pollTimer = setTimeout(poll, 1000);
+        // 连续失败时指数退避（1s→2s→4s→8s→10s 封顶），后端恢复后自动回到 1s
+        const delay = state.failures
+          ? Math.min(1000 * 2 ** Math.min(state.failures, 4), 10000)
+          : 1000;
+        state.pollTimer = setTimeout(poll, delay);
       }
     }
     function render(s) {
       const p = s.portfolio || {}, r = s.risk || {}, t = s.trade_stats || {}, f = s.fusion_ml || {}, e = s.execution || {}, o = s.latest_order || {}, live = s.live_state || {};
-      state.scanTick += 1;
       // 只用实时行情，不回退到 latest_order 的历史现货价——那是下单瞬间的
       // 快照且永不清零，行情中断时会显示陈旧价并算出虚构的开盘涨跌幅
       const btcSpot = Number(live.btc_price || 0);
@@ -603,9 +620,14 @@
         $("edge").className = "v yellow";
         $("edge").title = predictionEdge.reason || "尚无通过风控的交易信号";
       }
-      $("ddRisk").textContent = `${fmt.num(Math.min(10, (r.max_drawdown || 0) / 10), 1)}/10`;
-      $("ddBar").style.width = Math.max(0, Math.min(100, r.max_drawdown || 0)) + "%";
-      $("openSummary").textContent = `${fmt.usd(p.unrealized_pnl)} / ${fmt.usd(e.total_exposure)}`;
+      // 回撤徽标随风险等级变化（原为写死的"注意"，0% 和 80% 都一个样）
+      const dd = Number(r.max_drawdown || 0);
+      const ddLevel = dd < 3 ? ["green", "正常"] : dd < 8 ? ["yellow", "注意"] : ["red", "危险"];
+      $("ddRisk").textContent = `${fmt.num(Math.min(10, dd / 10), 1)}/10`;
+      $("ddRisk").className = "v " + ddLevel[0];
+      $("ddBadge").textContent = ddLevel[1];
+      $("ddBadge").className = ddLevel[0];
+      $("ddBar").style.width = Math.max(0, Math.min(100, dd)) + "%";
       const period = `${live.market_label || "BTC 15M"} ${marketWindow(live)}`;
       $("scanSpot").textContent = `现货 ${hasBtcSpot ? fmt.usd(btcSpot) : "等待数据"}`;
       // 15 分钟市场的结算基准：开盘参考价 vs 现价（涨=UP 赢，跌=DOWN 赢）
@@ -1223,19 +1245,12 @@
       miniChart("analyticsVolumeChart", volumeSeries, "#1674c9", true);
       miniChart("analyticsWinChart", winSeries, "#168c55");
       miniChart("analyticsEdgeChart", edgeSeries, "#168c55");
-      bars("bars", [{k:"盘口",v:s.processors?.CVDOrderBook?.fires_total||0,c:"#ffe600"},{k:"成交",v:s.execution?.orders_filled_total||0,c:"#00b7ff"},{k:"盈利",v:s.execution?.winning_trades_total||0,c:"#39ff14"},{k:"亏损",v:s.execution?.losing_trades_total||0,c:"#ff1744"}]);
-      pnlDisk("donut", s.portfolio?.unrealized_pnl || s.portfolio?.total_pnl || 0, s.portfolio?.roi || 0);
+      // 「状态统计与收益圆环」面板被 CSS 隐藏（.main-bottom 第 2 块），
+      // 不再每秒向 0×0 画布绘制；若要恢复该面板，需同时恢复
+      // bars("bars", ...) 与 pnlDisk("donut", ...) 的调用。
     }
     function drawKline(candleData) {
-      const container = $("tvKline");
-      container.style.display = "none";
-      container.innerHTML = "";
-      $("kline").style.display = "block";
-      if (!candleData.length) {
-        candles("kline", [], true);
-        return;
-      }
-      candles("kline", candleData);
+      candles("kline", candleData, !candleData.length);
     }
     poll();
   </script>
