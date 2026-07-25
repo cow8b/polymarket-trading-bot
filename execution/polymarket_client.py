@@ -1,6 +1,14 @@
 """
-Polymarket Client - Production Implementation
-Real API integration with Polymarket CLOB
+⚠️ DEPRECATED — 不在实盘路径上，请勿接线。
+
+本模块是早期的独立 Polymarket CLOB 客户端，除 `execution/test_execution.py`
+外全仓无引用。真实的下单路径是 Nautilus 原生 Polymarket adapter：
+`bot/runner.py`（PolymarketExecClientConfig）+ `bot/strategy.py`
+（order_factory.market + submit_order）。
+
+已知缺陷（保留仅供参考，勿用于实盘）：
+- `get_btc_market()` 未实现真实市场搜索（现已改为抛 NotImplementedError）。
+- 无盘口时价格回退 0.5、手续费按 0 计算。
 """
 import os
 import asyncio
@@ -148,28 +156,14 @@ class PolymarketClient:
             logger.error("Client not connected")
             return None
         
-        try:
-            # Search for BTC markets
-            # Note: You'll need to find the specific market ID for your BTC price prediction
-            # This is a placeholder - update with actual market ID
-            
-            # Example: Get market by condition ID
-            # markets = self.client.get_markets()
-            
-            # For now, return a mock structure
-            # TODO: Implement actual market search
-            logger.warning("BTC market lookup not fully implemented")
-            
-            return {
-                "condition_id": "BTC_PRICE_PREDICTION",  # Replace with real ID
-                "market_id": "btc_market",
-                "question": "Will BTC be above $65000?",
-                "end_date": "2026-03-01",
-            }
-            
-        except Exception as e:
-            logger.error(f"Error fetching BTC market: {e}")
-            return None
+        # 市场搜索从未实现。此前这里返回一个写死的假市场
+        # （condition_id="BTC_PRICE_PREDICTION"），任何调用方拿去下单都会
+        # 造成资金损失，因此改为显式失败。真实的市场发现走
+        # bot/runner.py 的 Gamma slug 批量查询（btc-updown-15m-*）。
+        raise NotImplementedError(
+            "PolymarketClient.get_btc_market 未实现真实市场搜索；"
+            "请使用 bot/runner.py 的 Nautilus adapter 路径"
+        )
     
     async def get_market_price(self, token_id: str) -> Optional[Decimal]:
         """

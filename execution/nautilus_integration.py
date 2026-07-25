@@ -1,3 +1,11 @@
+"""
+⚠️ DEPRECATED — 不在实盘路径上，请勿接线。
+
+本模块是 `bot/runner.py` 的过期副本，全仓无外部引用（仅被同样已废弃的
+execution/execution_engine.py 的非 dry-run 分支引用）。已知它仍使用
+`quote_quantity=False`（按 token 数量下单）的旧语义；现行正确路径是
+`quote_quantity=True`（按 USD），见 patches/market_orders.py 的说明。
+"""
 import os
 import asyncio
 import math

@@ -1,6 +1,10 @@
 """
-Execution Engine
-Manages order placement, fills, and position lifecycle
+⚠️ DEPRECATED — 不在实盘路径上，请勿接线。
+
+本模块是早期的订单/持仓生命周期引擎，全仓唯一引用是
+`execution/test_execution.py`。真实执行路径见 `bot/strategy.py`
+（Nautilus submit_order）。单例默认 dry_run=True；非 dry-run 分支
+依赖的旧集成层（execution/nautilus_integration.py）同样已废弃。
 """
 import asyncio
 from decimal import Decimal
@@ -259,7 +263,10 @@ class ExecutionEngine:
         # In live mode, submit to Polymarket via Nautilus
         if not self.dry_run:
             try:
-                from execution.nautilus_polymarket_integration import get_polymarket_integration
+                # 修正：旧代码 import 了不存在的模块名
+                # execution.nautilus_polymarket_integration，导致非 dry-run
+                # 下必然抛 ImportError 并把订单标为 REJECTED。
+                from execution.nautilus_integration import get_polymarket_integration
                 
                 integration = get_polymarket_integration(simulation_mode=False)
                 

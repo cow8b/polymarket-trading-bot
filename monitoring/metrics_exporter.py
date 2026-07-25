@@ -104,7 +104,6 @@ from prometheus_client import (
 from core.database import DashboardStateRepository
 from monitoring.performance_tracker import get_performance_tracker
 from execution.risk_engine import get_risk_engine
-from execution.execution_engine import get_execution_engine
 
 # All 10 signal processor names (canonical labels used in Prometheus)
 PROCESSOR_NAMES = [
@@ -257,7 +256,6 @@ class GrafanaMetricsExporter:
 
         self.performance = get_performance_tracker()
         self.risk = get_risk_engine()
-        self.execution = get_execution_engine()
 
         self._setup_metrics()
         self._history_lock = threading.Lock()
