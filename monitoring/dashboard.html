@@ -12,9 +12,14 @@
       --line: #2b2923;
       --text: #15130f;
       --muted: #69645a;
+      /* 语义分区：--green/--red 只用于市场方向（红涨绿跌）；
+         盈亏用更深的账目墨色 + 正负号双通道；警示统一琥珀 */
       --green: #168c55;
       --red: #d93c4d;
-      --yellow: #d69b17;
+      --pnl-pos: #0e5c38;
+      --pnl-neg: #a32a38;
+      --amber: #8a5a00;
+      --yellow: #8a5a00;
       --blue: #1674c9;
     }
     * { box-sizing: border-box; }
@@ -24,7 +29,8 @@
       background:
         radial-gradient(circle at 50% -20%, rgba(255,255,255,.85), transparent 34rem),
         linear-gradient(180deg, #f7f1df, #e7decc);
-      font-family: "Share Tech Mono", "Roboto Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      /* 中文显式落到 PingFang/Noto，避免 mono 栈 fallback 造成字重不齐 */
+      font-family: "Share Tech Mono", "Roboto Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "PingFang SC", "Noto Sans SC", "Microsoft YaHei", monospace;
       /* 布局最小宽度 1180px；窄屏（手机/分屏）依赖横向滚动查看右侧面板 */
       overflow-x: auto;
     }
@@ -46,17 +52,13 @@
       gap: 6px;
       align-items: stretch;
       position: relative;
-      margin-bottom: 26px;
+      margin-bottom: 6px;
     }
-    /* 统计横条内容来自 data-stats 属性，由轮询用真实统计填充（原为写死的假数据） */
-    .topbar::after {
-      content: attr(data-stats);
-      position: absolute; left: 0; right: 0; bottom: -24px;
-      height: 19px; display: flex; align-items: center;
-      padding: 0 12px; background: #050505; color: #f2ead8;
-      border: 1px solid #16130f; font-size: 10px; letter-spacing: 2px;
-      overflow: hidden; white-space: nowrap;
-    }
+    /* 原独立的策略统计横条已并入跑马灯内容，顶部由四条并为两条：
+       报头行 + 状态带（LIVE FEED 跑马灯 ▸ 子系统健康 chips） */
+    .statusband { display: flex; gap: 6px; align-items: stretch; margin: 0 0 6px; }
+    .statusband .marquee { flex: 1; min-width: 0; margin: 0; }
+    .statusband .sysbar { margin: 0; flex: 0 0 auto; flex-wrap: nowrap; align-items: center; overflow: hidden; }
     .brand, .price-strip, .clock, .panel {
       background: linear-gradient(180deg, #f8f2e5, #eee7d8);
       border: 1px solid #16130f;
@@ -73,15 +75,15 @@
       box-shadow: 0 2px 0 rgba(0,0,0,.22);
     }
     .brand b { font-size: 16px; letter-spacing: 1.6px; text-shadow: none; }
-    .brand span { color: var(--muted); font-size: 9px; display: block; margin-top: 3px; }
+    .brand span { color: var(--muted); font-size: 10px; display: block; margin-top: 3px; }
     .price-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: #16130f; }
     .price-card { background: #f4ecd9; padding: 5px 8px; display: grid; grid-template-columns: auto 1fr; column-gap: 7px; align-items: baseline; }
-    .price-card .k { color: var(--muted); font-size: 9px; }
+    .price-card .k { color: var(--muted); font-size: 10px; }
     .price-card .v { color: #111; font-size: 14px; font-weight: 900; margin-top: 0; text-align: right; text-shadow: none; }
-    .price-card .chg { grid-column: 1 / -1; font-size: 8px; color: var(--green); text-align: right; margin-top: -1px; }
+    .price-card .chg { grid-column: 1 / -1; font-size: 10px; color: var(--green); text-align: right; margin-top: -1px; }
     .clock { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; padding-right: 10px; }
     .clock .time { color: #111; font-size: 18px; font-weight: 900; text-shadow: none; }
-    .clock .status { color: var(--green); font-size: 10px; margin-top: 3px; }
+    .clock .status { color: var(--green); font-size: 11px; margin-top: 3px; }
     .marquee {
       margin: 5px 0 6px;
       background: #f4ecd9;
@@ -105,13 +107,48 @@
     /* 子系统健康条：状态用图标+文字双通道表达，不依赖颜色单独传义 */
     .sysbar { display: flex; gap: 5px; flex-wrap: wrap; margin: 0 0 6px; }
     .sys-chip { border: 1px solid rgba(22,19,15,.45); background: #f4ecd9; color: #17140f;
-      font-size: 9px; letter-spacing: 1px; padding: 2px 8px; white-space: nowrap; }
+      font-size: 10px; letter-spacing: 1px; padding: 2px 8px; white-space: nowrap; }
     .sys-chip b { font-weight: 900; margin-right: 4px; }
     .sys-chip.ok b { color: var(--green); }
     .sys-chip.bad b { color: var(--red); }
     .sys-chip.warn b { color: #8a6d00; }
+    /* ── 回合钟（HERO）───────────────────────────────────────────── */
+    .round-clock {
+      display: grid; grid-template-columns: 170px 1fr 300px 150px; gap: 0;
+      background: linear-gradient(180deg, #f8f2e5, #eee7d8);
+      border: 1px solid #16130f; margin-bottom: 6px; min-height: 128px;
+    }
+    .rc-cell { padding: 12px 14px; border-right: 1px dashed rgba(22,19,15,.28); display: flex; flex-direction: column; justify-content: center; min-width: 0; }
+    .rc-cell:last-child { border-right: 0; }
+    .rc-label { color: var(--muted); font-size: 10px; letter-spacing: 1px; }
+    .rc-id { font-size: 16px; font-weight: 900; margin: 4px 0 2px; }
+    .rc-phase { font-size: 11px; color: var(--muted); }
+    .rc-track { position: relative; height: 14px; border: 1px solid rgba(22,19,15,.45); background: #f3eddd; overflow: hidden; }
+    .rc-elapsed { position: absolute; inset: 0 auto 0 0; width: 0; background: rgba(22,19,15,.12); }
+    .rc-needle { position: absolute; top: -2px; bottom: -2px; width: 3px; left: 0; background: var(--ink); transition: left .6s linear; }
+    .rc-needle.up { background: var(--red); box-shadow: 0 0 6px rgba(217,60,77,.6); }
+    .rc-needle.down { background: var(--green); box-shadow: 0 0 6px rgba(22,140,85,.6); }
+    .rc-baseline { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-top: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .rc-baseline b { color: var(--ink); font-size: 14px; }
+    .rc-delta { font-size: 20px; font-weight: 900; color: var(--ink); white-space: nowrap; }
+    .rc-delta.up { color: var(--red); }
+    .rc-delta.down { color: var(--green); }
+    .rc-quotes { flex-direction: row; align-items: center; justify-content: space-around; gap: 8px; }
+    .rc-q { text-align: center; }
+    .rc-q b { display: block; font-size: 32px; font-weight: 900; line-height: 1.05; margin-top: 3px; }
+    .rc-plus { font-size: 18px; color: var(--muted); }
+    .rc-count-num { font-size: 34px; font-weight: 900; line-height: 1; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    /* 回合结算：整条带做一次"打印"收缩闪动（全页唯一编排动效时刻） */
+    .round-clock.round-print { animation: roundPrint .9s ease-out 1; }
+    @keyframes roundPrint {
+      0% { filter: brightness(1.35); transform: translateY(2px); }
+      45% { filter: brightness(.92); }
+      100% { filter: none; transform: none; }
+    }
+    @media (prefers-reduced-motion: reduce) { .round-clock.round-print { animation: none; } }
     .main-top { display: grid; grid-template-columns: 1fr 1.35fr 1fr 1fr; gap: 6px; min-height: 338px; }
-    .main-bottom { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 6px; min-height: 630px; }
+    /* min-height 移除：决策树折叠时不再占住 630px 空白 */
+    .main-bottom { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 6px; }
     .main-bottom > .panel:nth-child(2) { display: none; }
     .footer-grid { display: grid; grid-template-columns: 1fr 1.08fr 1.12fr; gap: 6px; margin-top: 6px; min-height: 268px; }
     .panel { padding: 6px; position: relative; overflow: hidden; background: linear-gradient(180deg, #f7f0df, #ece4d4); }
@@ -127,17 +164,19 @@
     }
     .live {
       position: absolute; top: 7px; right: 7px;
-      color: var(--red); border: 1px solid rgba(217,60,77,.7); padding: 2px 7px; font-size: 9px; background: rgba(217,60,77,.08);
-      animation: pulse 1.3s infinite;
+      color: var(--red); border: 1px solid rgba(217,60,77,.7); padding: 2px 7px; font-size: 10px; background: rgba(217,60,77,.08);
+      
     }
     @keyframes pulse { 50% { opacity: .38; box-shadow: 0 0 14px var(--green); } }
     .big-pnl { color: var(--green); font-size: 44px; font-weight: 900; line-height: .92; margin: 20px 0 12px; text-shadow: 1px 1px 0 rgba(0,0,0,.12); }
-    .pnl-sub { color: var(--muted); font-size: 9px; margin-top: -4px; margin-bottom: 6px; }
+    .pnl-sub { color: var(--muted); font-size: 10px; margin-top: -4px; margin-bottom: 6px; }
     .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
     .metric { background: transparent; border: 1px dashed rgba(22,19,15,.28); padding: 5px; min-height: 47px; }
-    .metric .k { color: var(--muted); font-size: 9px; }
+    .metric .k { color: var(--muted); font-size: 10px; }
     .metric .v { margin-top: 3px; font-size: 14px; font-weight: 800; }
     .green { color: var(--green); } .red { color: var(--red); } .yellow { color: var(--yellow); } .blue { color: var(--blue); } .muted { color: var(--muted); }
+    /* 盈亏专用账目墨色（比行情红绿更深沉），警示琥珀 */
+    .pnl-pos { color: var(--pnl-pos); } .pnl-neg { color: var(--pnl-neg); } .amber { color: var(--amber); }
     .riskbar { height: 5px; background: rgba(0,0,0,.12); margin-top: 6px; overflow: hidden; }
     .riskbar span { display: block; height: 100%; background: linear-gradient(90deg, var(--yellow), var(--red)); }
     canvas { width: 100%; height: 100%; display: block; }
@@ -145,7 +184,7 @@
     .chartbox #kline { position: absolute; inset: 4px; width: calc(100% - 8px); height: calc(100% - 8px); }
     .chart-title { position: absolute; top: 8px; left: 10px; color: var(--muted); font-size: 11px; z-index: 1; }
     .chart-change { position: absolute; top: 8px; right: 10px; color: var(--green); font-size: 11px; z-index: 1; }
-    .book { margin-top: 5px; font-size: 9px; display: grid; grid-template-columns: .72fr 1.28fr; gap: 5px; }
+    .book { margin-top: 5px; font-size: 10px; display: grid; grid-template-columns: .72fr 1.28fr; gap: 5px; }
     .price-stream { border: 1px solid rgba(22,19,15,.42); background: rgba(255,255,255,.22); padding: 4px; height: 105px; overflow: hidden; }
     .stream-line { padding: 1px 0; color: var(--muted); }
     .book-side { min-width: 0; }
@@ -159,33 +198,29 @@
     .book-row.bid .book-depth { background: var(--green); }
     .pos-list, .logs { overflow-y: auto; scrollbar-color: var(--green) #111; }
     .pos-list { max-height: 252px; }
-    .pos-row { display: grid; grid-template-columns: 32px 48px 1fr 56px; gap: 5px; padding: 4px 0; border-bottom: 1px dashed rgba(22,19,15,.22); font-size: 9px; }
-    .tag { border: 1px solid #444; color: var(--yellow); padding: 1px 4px; font-size: 9px; }
+    .pos-row { display: grid; grid-template-columns: 32px 48px 1fr 56px; gap: 5px; padding: 4px 0; border-bottom: 1px dashed rgba(22,19,15,.22); font-size: 10px; }
+    .tag { border: 1px solid #444; color: var(--yellow); padding: 1px 4px; font-size: 10px; }
     .scanner-value { display: grid; grid-template-columns: 1fr 18px 1fr; align-items: end; gap: 4px; margin: 8px 0 2px; text-align: center; }
     .scanner-quote { display: flex; min-width: 0; flex-direction: column; align-items: center; background: transparent !important; }
-    .scanner-label { margin-bottom: 2px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .08em; }
+    .scanner-label { margin-bottom: 2px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .08em; }
     .scanner-price { background: transparent !important; font-size: 31px; font-weight: 900; line-height: 1; }
     .scanner-plus { align-self: end; padding-bottom: 2px; color: var(--ink); font-size: 19px; font-weight: 900; }
     .scanner-empty { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
-    .scan-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; margin-bottom: 6px; }
+    .scan-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-bottom: 6px; }
     /* 与本卡片 UP/DOWN 盘口报价配色一致：红=上涨、绿=下跌 */
-    .scan-open { font-size: 11px; color: var(--muted); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
-    .scan-open b { font-weight: 700; }
-    .scan-open b.up { color: var(--red); }
-    .scan-open b.down { color: var(--green); }
     .direction-boxes { display: flex; gap: 5px; margin: 6px 0; }
-    .direction-box { padding: 3px 7px; border: 1px solid #222; background: transparent; font-size: 9px; }
+    .direction-box { padding: 3px 7px; border: 1px solid #222; background: transparent; font-size: 10px; }
     /* 突破方向框与 UP/DOWN 报价配色一致：红=上行、绿=下行 */
     .direction-box.on.up { color: var(--red); border-color: rgba(255,51,102,.55); box-shadow: 0 0 8px rgba(255,51,102,.25); }
     .direction-box.on.down { color: var(--green); border-color: rgba(0,255,102,.55); box-shadow: 0 0 8px rgba(0,255,102,.25); }
     .spark { height: 136px; border: 1px solid rgba(22,19,15,.42); background: #f3eddd; }
     .tree-counts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 5px; }
-    .tree-count { border: 0; background: transparent; padding: 2px 4px; font-size: 9px; color: #e7e0cf; text-align: right; }
+    .tree-count { border: 0; background: transparent; padding: 2px 4px; font-size: 10px; color: #e7e0cf; text-align: right; }
     .tree-count b { color: #fff; display: inline; font-size: 11px; margin-left: 6px; text-shadow: none; }
     .tree-wrap { display: grid; grid-template-columns: 130px 1fr 220px; gap: 8px; height: 520px; }
     .legend { border: 1px solid rgba(22,19,15,.25); padding: 7px; height: max-content; margin-top: 42px; background: rgba(255,255,255,.2); }
-    .legend div { margin: 5px 0; font-size: 9px; }
-    .eff-table { font-size: 9px; text-align: left; }
+    .legend div { margin: 5px 0; font-size: 10px; }
+    .eff-table { font-size: 10px; text-align: left; }
     .eff-row { display: grid; grid-template-columns: 1fr 52px; gap: 5px; padding: 6px 8px; border: 1px solid rgba(22,19,15,.24); margin-bottom: 5px; background: rgba(255,255,255,.18); }
     .dot { display: inline-block; width: 9px; height: 9px; margin-right: 7px; }
     .tree { min-width: 0; height: 520px; }
@@ -231,9 +266,19 @@
     }
     .focus-bar.event-flash { animation: eventFlash .75s ease-out 1; }
     @keyframes eventFlash { 0% { box-shadow: inset 0 0 0 2px #fff, 0 0 28px rgba(255,51,102,.85); filter: brightness(1.28); } 100% { box-shadow: 0 0 18px rgba(255,51,102,.12); filter: none; } }
-    .tree-mode { display: inline-block; margin-left: 12px; padding: 1px 7px; border: 1px solid var(--green); color: #7effad; font-size: 9px; letter-spacing: 1px; box-shadow: 0 0 7px rgba(0,255,102,.35); animation: modePulse 1.5s ease-in-out infinite; }
+    .tree-mode { display: inline-block; margin-left: 12px; padding: 1px 7px; border: 1px solid var(--green); color: #7effad; font-size: 10px; letter-spacing: 1px; box-shadow: 0 0 7px rgba(0,255,102,.35); }
     .tree-mode.blocked { color: #ff8099; border-color: var(--red); box-shadow: 0 0 7px rgba(255,51,102,.45); }
-    @keyframes modePulse { 50% { opacity: .55; } }
+    /* 动效预算：只保留跑马灯、决策进行中的流光与成交闪烁；尊重系统减弱动效 */
+    @media (prefers-reduced-motion: reduce) {
+      .marquee .track, .edge.active, .node.active, .node-beacon, .focus-bar.event-flash { animation: none !important; }
+    }
+    a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+    /* 决策树折中方案：待命时折叠释放首屏，决策进行时自动展开 */
+    .tree-collapse-hint { float: right; color: var(--muted); font-size: 10px; font-weight: 400; letter-spacing: 0; }
+    #treePanel .tree-wrap { transition: max-height .5s ease, opacity .35s ease; max-height: 560px; overflow: hidden; }
+    #treePanel.tree-collapsed .tree-wrap { max-height: 0; opacity: 0; }
+    #treePanel.tree-collapsed { min-height: 0; }
+    @media (prefers-reduced-motion: reduce) { #treePanel .tree-wrap { transition: none; } }
     .focus-main { font-size: 13px; font-weight: 900; }
     .focus-pnl { font-size: 26px; font-weight: 900; text-align: center; text-shadow: 0 0 12px currentColor; }
     .focus-desc { color: var(--muted); font-size: 10px; text-align: right; }
@@ -241,10 +286,10 @@
        实时分析（4 行指标格）同高 */
     .footer-grid .panel { min-height: 268px; display: flex; flex-direction: column; }
     .footer-grid .panel h2 { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: 0 0 auto; }
-    .footer-head-stat { color: #d9d2c2; font-size: 8px; letter-spacing: 1px; font-weight: 400; }
-    .footer-head-stat b { color: #fff; font-size: 9px; }
+    .footer-head-stat { color: #d9d2c2; font-size: 10px; letter-spacing: 1px; font-weight: 400; }
+    .footer-head-stat b { color: #fff; font-size: 10px; }
     .footer-live { color: var(--red); text-shadow: 0 0 6px rgba(217,60,77,.7); }
-    .footer-pnl-summary { display: flex; justify-content: space-between; align-items: baseline; min-height: 28px; padding: 1px 3px 5px; border-bottom: 1px dashed rgba(22,19,15,.3); font-size: 9px; color: var(--muted); }
+    .footer-pnl-summary { display: flex; justify-content: space-between; align-items: baseline; min-height: 28px; padding: 1px 3px 5px; border-bottom: 1px dashed rgba(22,19,15,.3); font-size: 10px; color: var(--muted); }
     .footer-pnl-summary b { margin-left: 5px; color: var(--green); font-size: 17px; text-shadow: 0 0 7px rgba(22,140,85,.25); }
     .footer-chart { position: relative; flex: 1; min-height: 216px; margin-top: 4px; border: 1px solid rgba(22,19,15,.42); background: linear-gradient(180deg, #f5efdf, #ded8cb); overflow: hidden; }
     .footer-chart canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
@@ -254,7 +299,7 @@
     .analytics-cell { min-width: 0; overflow: hidden; border-right: 1px dashed rgba(22,19,15,.28); border-bottom: 1px dashed rgba(22,19,15,.28); }
     .analytics-cell:nth-child(2n) { border-right: 0; }
     .analytics-cell:nth-last-child(-n+2) { border-bottom: 0; }
-    .analytics-label { height: 26px; display: flex; justify-content: space-between; align-items: center; padding: 3px 7px; color: var(--muted); font-size: 8px; letter-spacing: 1px; }
+    .analytics-label { height: 26px; display: flex; justify-content: space-between; align-items: center; padding: 3px 7px; color: var(--muted); font-size: 10px; letter-spacing: 1px; }
     .analytics-label b { color: var(--green); font-size: 11px; }
     .analytics-cell canvas { width: 100%; height: 79px; }
     .logs { flex: 1; height: auto; min-height: 231px; background: rgba(255,255,255,.2); border: 1px solid rgba(22,19,15,.42); padding: 6px; font-size: 11px; line-height: 1.4; }
@@ -268,7 +313,7 @@
 </head>
 <body>
   <div class="shell">
-    <header class="topbar" data-stats="▲ 策略统计 · 等待首轮数据">
+    <header class="topbar">
       <div class="brand"><b>BONEREAPER // POLYMARKET BOT </b><span>内置中文交易驾驶舱 · 轮询刷新 · 单进程查看</span></div>
       <div class="price-strip">
         <div class="price-card"><div class="k">BTC 现货</div><div id="btcSpot" class="v">等待数据</div><div class="chg">真实行情</div></div>
@@ -277,8 +322,36 @@
       </div>
       <div class="clock"><div id="utcTime" class="time">--:--:-- UTC</div><div id="conn" class="status">连接中</div></div>
     </header>
-    <div class="marquee"><div class="track"><span id="ticker">系统启动 // 等待真实行情 // 等待真实成交事件 // 轮询刷新已启用 //</span><span id="tickerDup" aria-hidden="true">系统启动 // 等待真实行情 // 等待真实成交事件 // 轮询刷新已启用 //</span></div></div>
-    <div class="sysbar" id="sysbar"><span class="sys-chip"><b>◌</b> 等待子系统状态</span></div>
+    <div class="statusband">
+      <div class="marquee"><div class="track"><span id="ticker">系统启动 // 等待真实行情 // 等待真实成交事件 // 轮询刷新已启用 //</span><span id="tickerDup" aria-hidden="true">系统启动 // 等待真实行情 // 等待真实成交事件 // 轮询刷新已启用 //</span></div></div>
+      <div class="sysbar" id="sysbar"><span class="sys-chip"><b>◌</b> 等待子系统状态</span></div>
+    </div>
+    <!-- 回合钟：把 15 分钟市场做成一件仪器——回合编号 · 进度带上的
+         开盘价基线与实时价差走针 · UP/DOWN 定价 · 结算倒计时 -->
+    <section class="round-clock" id="roundClock">
+      <div class="rc-cell rc-idcell">
+        <div class="rc-label">本轮市场</div>
+        <div id="rcId" class="rc-id">—</div>
+        <div id="rcPhase" class="rc-phase">等待市场</div>
+      </div>
+      <div class="rc-cell rc-band">
+        <div class="rc-track"><div id="rcElapsed" class="rc-elapsed"></div><div id="rcNeedle" class="rc-needle"></div></div>
+        <div class="rc-baseline">
+          <span>开盘 <b id="rcOpen">—</b></span>
+          <span id="rcDelta" class="rc-delta">等待开盘参考价</span>
+          <span>现价 <b id="rcNow">—</b></span>
+        </div>
+      </div>
+      <div class="rc-cell rc-quotes">
+        <div class="rc-q"><span class="rc-label">上涨（UP）</span><b id="rcUp" class="red">—</b></div>
+        <div class="rc-plus">+</div>
+        <div class="rc-q"><span class="rc-label">下跌（DOWN）</span><b id="rcDown" class="green">—</b></div>
+      </div>
+      <div class="rc-cell rc-count">
+        <div class="rc-label">距结算</div>
+        <div id="rcCountdown" class="rc-count-num">--:--</div>
+      </div>
+    </section>
 
     <section class="main-top">
       <div class="panel">
@@ -307,7 +380,6 @@
         <span class="live">扫描中</span>
         <h2>对冲扫描器</h2>
         <div class="scan-head"><span>BTC 15分钟</span><span id="scanSpot">现货 $0.00</span></div>
-        <div class="scan-open" id="scanOpen">开盘 — · 现价 —</div>
         <div class="scanner-value" id="hedgeValue">等待数据</div>
         <div class="direction-boxes"><div id="upBox" class="direction-box up">上行突破</div><div id="downBox" class="direction-box down">下行突破</div></div>
         <div class="spark"><canvas id="spark"></canvas></div>
@@ -315,8 +387,8 @@
     </section>
 
     <section class="main-bottom">
-      <div class="panel">
-        <h2>策略决策树流程图 <span id="treeMode" class="tree-mode">策略待命</span></h2>
+      <div class="panel" id="treePanel">
+        <h2>策略决策树流程图 <span id="treeMode" class="tree-mode">策略待命</span><span class="tree-collapse-hint" aria-hidden="true">待命时自动折叠 · 决策进行时展开</span></h2>
         <div class="tree-counts">
           <div class="tree-count">持仓中<b id="inFlight">0</b></div>
           <div class="tree-count">本轮信号<b id="processed">0</b></div>
@@ -617,7 +689,7 @@
         `<span class="sys-chip ${c.cls}"${c.title ? ` title="${c.title.replace(/"/g, "&quot;")}"` : ""}><b>${c.icon}</b>${c.label} ${c.text}</span>`
       ).join("");
       $("totalPnl").textContent = fmt.usd(p.total_pnl);
-      $("totalPnl").className = "big-pnl " + (p.total_pnl >= 0 ? "green" : "red");
+      $("totalPnl").className = "big-pnl " + (p.total_pnl >= 0 ? "pnl-pos" : "pnl-neg");
       $("pnlSub").textContent = `账户权益 ${fmt.usd(p.current_capital)} · 已实现 ${p.total_pnl >= 0 ? "+" : ""}${fmt.usd(p.total_pnl)} · 未实现 ${fmt.usd(p.unrealized_pnl)}`;
       $("fills").textContent = fmt.int(e.orders_filled_total);
       $("winRate").textContent = fmt.pct(t.win_rate);
@@ -625,7 +697,7 @@
       if (predictionEdge.available && Number.isFinite(Number(predictionEdge.edge_pct))) {
         const predictionValue = Number(predictionEdge.edge_pct);
         $("edge").textContent = `${predictionValue >= 0 ? "+" : ""}${fmt.pct(predictionValue)}`;
-        $("edge").className = "v " + (predictionValue > 0 ? "green" : predictionValue < 0 ? "red" : "yellow");
+        $("edge").className = "v " + (predictionValue > 0 ? "pnl-pos" : predictionValue < 0 ? "pnl-neg" : "yellow");
         // 该值只在下单前写入一次，标注更新时间避免陈旧数据被当作"当前"
         const edgeAt = predictionEdge.updated_at ? ` · 更新于 ${String(predictionEdge.updated_at).slice(11,19)} UTC` : "";
         $("edge").title = `${predictionEdge.direction || "-"} · 模型胜率 ${fmt.pct(Number(predictionEdge.held_probability || 0) * 100)} · 可成交价 ${fmt.num(predictionEdge.executable_entry_price, 4)} · 未扣费${edgeAt}`;
@@ -636,7 +708,7 @@
       }
       // 回撤徽标随风险等级变化（原为写死的"注意"，0% 和 80% 都一个样）
       const dd = Number(r.max_drawdown || 0);
-      const ddLevel = dd < 3 ? ["green", "正常"] : dd < 8 ? ["yellow", "注意"] : ["red", "危险"];
+      const ddLevel = dd < 3 ? ["green", "正常"] : dd < 8 ? ["amber", "注意"] : ["amber", "危险"];
       $("ddRisk").textContent = `${fmt.num(Math.min(10, dd / 10), 1)}/10`;
       $("ddRisk").className = "v " + ddLevel[0];
       $("ddBadge").textContent = ddLevel[1];
@@ -644,32 +716,7 @@
       $("ddBar").style.width = Math.max(0, Math.min(100, dd)) + "%";
       const period = `${live.market_label || "BTC 15M"} ${marketWindow(live)}`;
       $("scanSpot").textContent = `现货 ${hasBtcSpot ? fmt.usd(btcSpot) : "等待数据"}`;
-      // 15 分钟市场的结算基准：开盘参考价 vs 现价（涨=UP 赢，跌=DOWN 赢）
       const openRef = Number(live.price_to_beat || 0);
-      if (openRef > 0 && hasBtcSpot) {
-        const diff = btcSpot - openRef;
-        const pct = (diff / openRef) * 100;
-        const dirCls = diff >= 0 ? "up" : "down";
-        const arrow = diff >= 0 ? "▲" : "▼";
-        const sign = diff >= 0 ? "+" : "";
-        $("scanOpen").innerHTML =
-          `开盘 ${fmt.usd(openRef)} → 现价 ${fmt.usd(btcSpot)} ` +
-          `<b class="${dirCls}">${arrow} ${sign}${diff.toFixed(2)}（${sign}${pct.toFixed(3)}%）</b>`;
-      } else {
-        $("scanOpen").textContent = "等待开盘参考价";
-      }
-      // 顶部统计横条：真实策略统计（替代原写死的假数据）
-      const holdSecs = Math.max(0, Math.round(Number(t.avg_hold_seconds || 0)));
-      const holdTxt = `${Math.floor(holdSecs / 60)}M ${String(holdSecs % 60).padStart(2, "0")}S`;
-      document.querySelector(".topbar").dataset.stats = [
-        "▲ 策略统计",
-        `胜率 ${fmt.num(t.win_rate, 1)}%`,
-        `期望 ${fmt.usd(t.expectancy_usd)}/笔`,
-        `盈利因子 ${fmt.num(t.profit_factor, 2)}`,
-        `平均持仓 ${holdTxt}`,
-        `累计成交 ${fmt.int(e.orders_filled_total)}`,
-        `敞口 ${fmt.usd(e.total_exposure)}`,
-      ].join(" · ");
       // 只用 UP/DOWN 两个代币各自的实时报价。禁止回退到 latest_order 的
       // ask/bid——那是同一个代币的买卖价（恒 ask≥bid），会让"上行突破"
       // 永远点亮且并排数值毫无意义
@@ -685,17 +732,67 @@
       const isUp = hasOrderQuote && upQuote >= downQuote;
       $("upBox").className = "direction-box up" + (isUp ? " on" : "");
       $("downBox").className = "direction-box down" + (!isUp ? " on" : "");
+      // ── 回合钟（HERO）：进度带 + 开盘价基线 + 价差走针 + 定价 + 倒计时 ──
+      const rcStart = live.market_start ? new Date(live.market_start).getTime() : 0;
+      const rcEnd = live.market_end ? new Date(live.market_end).getTime() : 0;
+      if (rcStart && rcEnd && rcEnd > rcStart) {
+        const prog = Math.max(0, Math.min(1, (Date.now() - rcStart) / (rcEnd - rcStart)));
+        $("rcElapsed").style.width = (prog * 100).toFixed(2) + "%";
+        $("rcNeedle").style.left = `calc(${(prog * 100).toFixed(2)}% - 1px)`;
+        const remainS = Math.max(0, Math.round((rcEnd - Date.now()) / 1000));
+        $("rcCountdown").textContent = remainS > 0
+          ? `${Math.floor(remainS / 60)}:${String(remainS % 60).padStart(2, "0")}`
+          : "结算中";
+        $("rcId").textContent = marketWindow(live) || "—";
+      } else {
+        $("rcId").textContent = "—";
+        $("rcCountdown").textContent = "--:--";
+      }
+      $("rcPhase").textContent = live.trade_window_open
+        ? "交易窗口开启"
+        : (live.next_window || "等待市场");
+      if (openRef > 0 && hasBtcSpot) {
+        const d = btcSpot - openRef;
+        const pc = (d / openRef) * 100;
+        const dCls = d >= 0 ? "up" : "down";
+        const sign = d >= 0 ? "+" : "";
+        $("rcOpen").textContent = fmt.usd(openRef);
+        $("rcNow").textContent = fmt.usd(btcSpot);
+        $("rcDelta").textContent = `${d >= 0 ? "▲" : "▼"} ${sign}${d.toFixed(2)}（${sign}${pc.toFixed(3)}%）`;
+        $("rcDelta").className = "rc-delta " + dCls;
+        $("rcNeedle").classList.remove("up", "down");
+        $("rcNeedle").classList.add(dCls);
+      } else {
+        $("rcOpen").textContent = "—";
+        $("rcNow").textContent = hasBtcSpot ? fmt.usd(btcSpot) : "—";
+        $("rcDelta").textContent = "新市场开盘 · 等待参考价";
+        $("rcDelta").className = "rc-delta";
+      }
+      $("rcUp").textContent = hasOrderQuote ? fmt.num(upQuote, 2) : "—";
+      /* rcQuotes 与扫描器共用 hasOrderQuote 口径 */
+      $("rcDown").textContent = hasOrderQuote ? fmt.num(downQuote, 2) : "—";
+      // 回合切换瞬间播放一次"打印"动效（全页唯一编排时刻）
+      if (state.lastRoundSlug && live.market_slug && state.lastRoundSlug !== live.market_slug) {
+        const rc = $("roundClock");
+        rc.classList.remove("round-print");
+        void rc.offsetWidth;
+        rc.classList.add("round-print");
+      }
+      if (live.market_slug) state.lastRoundSlug = live.market_slug;
       $("footerFills").textContent = fmt.int(e.orders_filled_total);
       $("chartTitle").textContent = Array.isArray(live.candles) && live.candles.length ? `BTC/USDT · Binance 1分钟 · ${fmt.usd(live.candles[live.candles.length-1].close)}` : "BTC/USDT · 等待真实K线";
       $("chartChange").textContent = live.candles_updated_at ? String(live.candles_updated_at).slice(11,19) : "—";
       const tickerText = [
         "实时信息",
         hasBtcSpot ? `BTC ${fmt.usd(btcSpot)}` : "等待 BTC 现货",
-        `轮询样本 ${fmt.int(state.history.length)}`,
+        `近10分钟采样 ${fmt.int(state.history.length)}`,
         `已提交订单 ${fmt.int(e.orders_placed_total)}`,
         `已成交 ${fmt.int(e.orders_filled_total)}`,
         `平仓成交 ${fmt.int(e.trades_closed_total)}`,
         `敞口 ${fmt.usd(e.total_exposure)}`,
+        `胜率 ${fmt.num(t.win_rate, 1)}%`,
+        `期望 ${fmt.usd(t.expectancy_usd)}/笔`,
+        `盈利因子 ${fmt.num(t.profit_factor, 2)}`,
         `风控回撤 ${fmt.num(r.max_drawdown, 2)}%`,
         `融合分 ${fmt.num(f.fusion_score, 3)}`,
         `上涨概率 ${fmt.pct((f.ml_prediction || 0) * 100)}`,
@@ -749,8 +846,8 @@
       const latestRealized = Number(latestEvent?.payload?.realized_pnl);
       const focusValue = Number.isFinite(latestRealized) ? latestRealized : (e.open_positions > 0 ? p.unrealized_pnl : 0);
       $("focusPnl").textContent = fmt.usd(focusValue);
-      $("focusPnl").className = "focus-pnl " + (focusValue >= 0 ? "green" : "red");
-      $("focusDesc").textContent = hasOrderQuote ? `${period} · ${isUp ? "上行优势" : "下行保护"} · 当前轮询样本 ${state.history.length}` : "没有真实订单/成交前不生成模拟收益";
+      $("focusPnl").className = "focus-pnl " + (focusValue >= 0 ? "pnl-pos" : "pnl-neg");
+      $("focusDesc").textContent = hasOrderQuote ? `${period} · ${isUp ? "上行占优" : "下行占优"} · 近10分钟采样 ${state.history.length}` : "没有真实订单/成交前不生成模拟收益";
       const treePnl = $("treePnlValue"), treeDisk = $("treePnlDisk");
       if (treePnl && treeDisk) {
         const v = focusValue || p.total_pnl || 0;
@@ -758,7 +855,7 @@
         // 其实是累计值，原标签写死会误导
         $("treePnlText").textContent = Number.isFinite(latestRealized) ? "本轮 PNL" : "累计 PNL";
         treePnl.textContent = Math.abs(v) >= 1000 ? (v < 0 ? "-" : "") + "$" + Math.round(Math.abs(v) / 1000) + "K" : fmt.usd(v);
-        treeDisk.setAttribute("fill", v >= 0 ? "#168c55" : "#d93c4d");
+        treeDisk.setAttribute("fill", v >= 0 ? "#0e5c38" : "#a32a38");
       }
       $("analyticsPnl").textContent = fmt.usd(p.total_pnl);
       const eventVolume = (Array.isArray(s.dashboard_events) ? s.dashboard_events : []).reduce((sum, ev) => {
@@ -772,7 +869,7 @@
       const strategyEdgeValue = Number(strategyEdge.edge_pct);
       if (strategyEdge.available && Number.isFinite(strategyEdgeValue)) {
         $("analyticsEdge").textContent = `${strategyEdgeValue >= 0 ? "+" : ""}${fmt.pct(strategyEdgeValue)} · ${fmt.int(strategyEdge.sample_size)}笔`;
-        $("analyticsEdge").className = strategyEdgeValue >= 0 ? "green" : "red";
+        $("analyticsEdge").className = strategyEdgeValue >= 0 ? "pnl-pos" : "pnl-neg";
         $("analyticsEdge").title = `${strategyEdge.sample_sufficient ? "样本可用" : "样本不足30笔"} · 单笔期望 ${fmt.usd(strategyEdge.expectancy_usd)} · 未单列手续费`;
       } else {
         $("analyticsEdge").textContent = `— · ${fmt.int(strategyEdge.sample_size || 0)}笔`;
@@ -780,17 +877,10 @@
         $("analyticsEdge").title = "等待已结算交易样本";
       }
       $("footerPnl").textContent = fmt.usd(p.total_pnl);
-      $("footerPnl").className = p.total_pnl >= 0 ? "green" : "red";
+      $("footerPnl").className = p.total_pnl >= 0 ? "pnl-pos" : "pnl-neg";
       $("footerAccount").textContent = `${live.mode === "live" ? "实盘" : "模拟"}账本 · ${fmt.int(live.completed_trades || 0)} 笔已平仓`;
-      // 时段后附结算倒计时（15 分钟市场的核心信息）
-      let settleTxt = "";
-      if (live.market_end) {
-        const remain = Math.round((new Date(live.market_end).getTime() - Date.now()) / 1000);
-        settleTxt = remain > 0
-          ? ` · 距结算 ${Math.floor(remain / 60)}:${String(remain % 60).padStart(2, "0")}`
-          : " · 结算中";
-      }
-      document.querySelector(".scan-head span:first-child").textContent = period + settleTxt;
+      // 结算倒计时已由回合钟（HERO）承载，扫描器只显示时段
+      document.querySelector(".scan-head span:first-child").textContent = period;
       renderPositions(s);
       renderBook(s);
       renderLogs(s);
@@ -812,7 +902,7 @@
       const exposure = positions.reduce((sum, pos) => sum + Number(pos.size_usd || 0), 0);
       $("openSummary").textContent = `${fmt.usd(unrealized)} / ${fmt.usd(exposure)}`;
       if (!positions.length) {
-        rows.push(`<div class="pos-row muted"><span>—</span><span class="tag">空仓</span><span>暂无真实持仓数据</span><span>—</span></div>`);
+        rows.push(`<div class="pos-row muted"><span>—</span><span class="tag">空仓</span><span>空仓 · 交易窗口内满足条件将自动建仓</span><span>—</span></div>`);
       }
       for (const pos of positions) {
         const pnl = Number(pos.unrealized_pnl || 0);
@@ -902,7 +992,7 @@
       const logsAtBottom =
         logsEl.scrollHeight - logsEl.scrollTop - logsEl.clientHeight < 30;
       if (!events.length) {
-        logsEl.innerHTML = `<div class="log-line muted"><b>--:--:--</b> 暂无真实订单/成交事件</div>`;
+        logsEl.innerHTML = `<div class="log-line muted"><b>--:--:--</b> 暂无成交事件 · 首笔成交后在此打印</div>`;
         return;
       }
       logsEl.innerHTML = events.map(ev => {
@@ -986,9 +1076,13 @@
             : (live.mode === "live" ? "实盘扫描 · 等待策略触发" : waitingText);
           mode.className = "tree-mode";
         }
+        // 待命：折叠树体释放首屏（表头与状态徽标保留可见）
+        $("treePanel")?.classList.add("tree-collapsed");
         syncFlowEffects(flowPnls.length ? flowPnls : [0]);
         return;
       }
+      // 决策进行/回放中：展开树体
+      $("treePanel")?.classList.remove("tree-collapsed");
       stages.forEach(item => {
         const target = map[item.stage];
         if (!target) return;
@@ -1167,7 +1261,7 @@
         const area = new Path2D(path);
         area.lineTo(rect.width, rect.height); area.lineTo(0, rect.height); area.closePath();
         const gradient = ctx.createLinearGradient(0, 0, 0, rect.height);
-        gradient.addColorStop(0, color === "#d93c4d" ? "rgba(217,60,77,.36)" : (color === "#1674c9" ? "rgba(22,116,201,.32)" : "rgba(22,140,85,.38)"));
+        gradient.addColorStop(0, (color === "#d93c4d" || color === "#a32a38") ? "rgba(163,42,56,.30)" : (color === "#1674c9" ? "rgba(22,116,201,.32)" : "rgba(14,92,56,.32)"));
         gradient.addColorStop(1, "rgba(30,30,30,.05)");
         ctx.fillStyle = gradient; ctx.fill(area);
       }
@@ -1264,8 +1358,8 @@
         ? Number.NaN
         : Number(edgeNowRaw);
       if (Number.isFinite(edgeNow) && (!edgeSeries.length || edgeSeries[edgeSeries.length - 1] !== edgeNow)) edgeSeries.push(edgeNow);
-      miniChart("fillsChart", pnlSeries, pnlNow >= 0 ? "#168c55" : "#d93c4d", true);
-      miniChart("analyticsPnlChart", pnlSeries, pnlNow >= 0 ? "#168c55" : "#d93c4d", true);
+      miniChart("fillsChart", pnlSeries, pnlNow >= 0 ? "#0e5c38" : "#a32a38", true);
+      miniChart("analyticsPnlChart", pnlSeries, pnlNow >= 0 ? "#0e5c38" : "#a32a38", true);
       miniChart("analyticsVolumeChart", volumeSeries, "#1674c9", true);
       miniChart("analyticsWinChart", winSeries, "#168c55");
       miniChart("analyticsEdgeChart", edgeSeries, "#168c55");
