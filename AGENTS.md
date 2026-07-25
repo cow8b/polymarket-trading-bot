@@ -36,15 +36,18 @@ docker compose down             # 停止并移除容器
 `BOT_ARGS="--live --tui" docker compose up`。Docker 部署默认设置
 `LIVE_CONFIRM=true`，因此不会卡在实盘确认输入。
 
-按顺序运行分阶段检查：
+先运行无网络单元测试，再按顺序运行分阶段检查（需要网络）：
 
 ```bash
+python -m pytest tests/                  # 无网络单元测试（持久化、补结算、分析）
 python scripts/test_data_sources.py test
 python scripts/test_ingestion.py test
-python scripts/test_nautilus.py test
-python scripts/test_strategy.py test
 python scripts/test_execution.py test
 ```
+
+历史上的 Phase 3/4 检查（`scripts/test_nautilus.py`、`scripts/test_strategy.py`）
+的目标文件在目录重构后已不存在，脚本保留为弃用提示；对应验证改由
+`pytest tests/` 与 `python main.py --test-mode` 覆盖。
 
 使用 `python scripts/view_trades.py` 查看模拟交易历史。
 机器人停机后，先使用
@@ -57,7 +60,16 @@ python scripts/test_execution.py test
 
 ## 测试指南
 
-仓库当前没有统一的 pytest 配置。以上脚本化分阶段检查是主要验证路径。新增行为时，在相关模块附近或 `tests/` 下添加聚焦的 `test_*.py`。交易逻辑应覆盖模拟安全行为和关键风控约束，例如入场价格限制、价差过滤、冷却时间和单市场最大交易次数。
+`tests/` 下是可直接用 `python -m pytest tests/` 运行的无网络单元测试（持久化仓库、补结算、分析与驾驶舱指标），提交前必须保持全绿。脚本化分阶段检查（见上）覆盖需要网络的数据源与执行链路。新增行为时，在相关模块附近或 `tests/` 下添加聚焦的 `test_*.py`。交易逻辑应覆盖模拟安全行为和关键风控约束，例如入场价格限制、价差过滤、冷却时间和单市场最大交易次数。
+
+完整的测试、审核与验收流程（变更风险分级 L1/L2/L3、资金路径审查清单、模拟验收与小额实盘灰度标准）见 `docs/TESTING_ACCEPTANCE.md`；任何合入/上线判定以该文档为准。
+
+## 文档规范
+
+除根目录的 `README*` 与本文件外，所有项目文档统一放在 `docs/` 下，并在
+`docs/README.md` 的索引表登记。完整规范（命名、语言、开头约定、与代码同步的
+要求）见 `docs/README.md`。改变行为的 PR 必须同步更新受影响文档；文档中引用的
+脚本、参数、路径必须真实存在。接手基线与风险清单见 `docs/HANDOVER_AUDIT.md`。
 
 ## 提交与 Pull Request 规范
 
