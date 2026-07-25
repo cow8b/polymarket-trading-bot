@@ -72,14 +72,15 @@ class SpikeDetectionProcessor(BaseSignalProcessor):
         if deviation_abs >= self.spike_threshold:
             direction = SignalDirection.BEARISH if deviation > 0 else SignalDirection.BULLISH
             target = Decimal(str(ma))
-            if deviation_abs >= 0.12:
+            # 阶梯随 spike_threshold 缩放（旧实现硬编码 0.12/0.08/0.05，与
+            # SPIKE_THRESHOLD 环境变量脱钩：默认 0.08 下 WEAK 档不可达、
+            # 最低从 MODERATE 起跳，变相放大融合贡献）。
+            if deviation_abs >= self.spike_threshold * 2.0:
                 strength = SignalStrength.VERY_STRONG
-            elif deviation_abs >= 0.08:
+            elif deviation_abs >= self.spike_threshold * 1.4:
                 strength = SignalStrength.STRONG
-            elif deviation_abs >= 0.05:
-                strength = SignalStrength.MODERATE
             else:
-                strength = SignalStrength.WEAK
+                strength = SignalStrength.MODERATE
 
             confidence = min(0.90, 0.50 + (deviation_abs - self.spike_threshold) * 3.0)
             if confidence < self.min_confidence:

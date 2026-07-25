@@ -369,9 +369,10 @@ class IntegratedBTCStrategy(Strategy):
             imbalance_threshold=0.30,
             min_book_volume=50.0,
         )
+        # 阈值为绝对概率差（processor 已从相对变化改为绝对差口径）。
         self.tick_velocity_processor = TickVelocityProcessor(
-            velocity_threshold_60s=0.015,
-            velocity_threshold_30s=0.010,
+            velocity_threshold_60s=0.008,
+            velocity_threshold_30s=0.005,
         )
         self.deribit_pcr_processor = DeribitPCRProcessor(
             bullish_pcr_threshold=1.20,
@@ -1378,6 +1379,16 @@ class IntegratedBTCStrategy(Strategy):
         self._no_instrument_id = market.get("no_instrument_id")
         self._yes_token_id = market.get("yes_token_id") or market.get("token_id")
         self._no_token_id = market.get("no_token_id")
+
+        # 跨市场状态清零：上一个市场结算前收敛到 ~0/~1 的价格若残留在缓冲
+        # 里，TickVelocity/Spike 会在新市场 ~0.5 开盘时算出巨幅假动量，每次
+        # 换盘吐一发高置信度错向信号（2026-07-25 双审计确认的换盘污染）。
+        self._tick_buffer.clear()
+        self.price_history.clear()
+        try:
+            self.divergence_processor.reset_history()
+        except Exception:
+            pass
 
         if waiting:
             self.next_switch_time = market["start_time"]
@@ -2683,7 +2694,9 @@ class IntegratedBTCStrategy(Strategy):
                 metadata["velocity_30s"] = sig.metadata.get("velocity_30s") or 0.0
                 break
 
-        fused = self.fusion_engine.fuse_signals(signals, min_signals=1, min_score=40.0)
+        # min_signals=2：融合分是占比制，单处理器独自开火时 score 恒为 100，
+        # 任何单点信号 bug 都会被放大成"高置信度"方向（双审计确认的传导链）。
+        fused = self.fusion_engine.fuse_signals(signals, min_signals=2, min_score=40.0)
 
         # ── Grafana: push fusion metrics ──────────────────────────────────────
         if self.grafana_exporter and fused:

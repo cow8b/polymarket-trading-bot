@@ -2,7 +2,7 @@
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -19,13 +19,15 @@ class TickVelocityProcessor(BaseSignalProcessor):
     """
     Measures how fast the Polymarket UP probability is moving in the last 60 s.
 
-    Fast moves in probability reflect real order flow — an actionable signal.
+    速度使用**绝对概率差**（curr − past）而非相对变化：概率是 0-1 的有界量，
+    相对差会让低价端的敏感度虚高十几倍（0.06 时 1 美分 = ±17%，0.90 时同样
+    1 美分只有 1%），而低价端恰是盘口最薄、最易被钓鱼单推动 mid 的地方。
     """
 
     def __init__(
         self,
-        velocity_threshold_60s: float = 0.015,
-        velocity_threshold_30s: float = 0.010,
+        velocity_threshold_60s: float = 0.008,
+        velocity_threshold_30s: float = 0.005,
         min_ticks: int = 5,
         min_confidence: float = 0.55,
     ):
@@ -35,15 +37,20 @@ class TickVelocityProcessor(BaseSignalProcessor):
         self.min_ticks = min_ticks
         self.min_confidence = min_confidence
         logger.info(
-            f"Initialized Tick Velocity Processor: "
-            f"60s={velocity_threshold_60s:.1%}, 30s={velocity_threshold_30s:.1%}"
+            f"Initialized Tick Velocity Processor (abs prob diff): "
+            f"60s={velocity_threshold_60s:.3f}, 30s={velocity_threshold_30s:.3f}"
         )
 
     def _get_price_at(
         self, tick_buffer: List[Dict], seconds_ago: float, now: datetime
-    ) -> Optional[float]:
+    ) -> Tuple[Optional[float], Optional[datetime]]:
+        """返回目标时刻附近（±15s）最近的 tick 价格及其时间戳。
+
+        时间戳一并返回，供调用方判断 30s/60s 是否解析到了同一根 tick——
+        tick 稀疏时两者会撞车，此时加速度是伪量（恒等于速度）。"""
         target = now - timedelta(seconds=seconds_ago)
         best: Optional[float] = None
+        best_ts: Optional[datetime] = None
         best_diff = float("inf")
         for tick in tick_buffer:
             ts = tick["ts"]
@@ -53,7 +60,10 @@ class TickVelocityProcessor(BaseSignalProcessor):
             if diff < best_diff:
                 best_diff = diff
                 best = float(tick["price"])
-        return best if best_diff <= 15 else None
+                best_ts = ts
+        if best_diff <= 15:
+            return best, best_ts
+        return None, None
 
     def process(
         self,
@@ -71,17 +81,26 @@ class TickVelocityProcessor(BaseSignalProcessor):
         now = datetime.now(timezone.utc)
         curr = float(current_price)
 
-        price_60s = self._get_price_at(tick_buffer, 60, now)
-        price_30s = self._get_price_at(tick_buffer, 30, now)
+        price_60s, ts_60s = self._get_price_at(tick_buffer, 60, now)
+        price_30s, ts_30s = self._get_price_at(tick_buffer, 30, now)
 
         if price_60s is None and price_30s is None:
             return None
 
-        vel_60s = ((curr - price_60s) / price_60s) if price_60s else None
-        vel_30s = ((curr - price_30s) / price_30s) if price_30s else None
+        # 绝对概率差（见类 docstring）。
+        vel_60s = (curr - price_60s) if price_60s is not None else None
+        vel_30s = (curr - price_30s) if price_30s is not None else None
 
+        # 30s/60s 解析到同一根 tick 时加速度无意义（恒等于速度、必然同号，
+        # 会无条件吃到"同向加速"置信度奖励）——视为未知。
         acceleration = 0.0
-        if vel_60s is not None and vel_30s is not None:
+        if (
+            vel_60s is not None
+            and vel_30s is not None
+            and ts_60s is not None
+            and ts_30s is not None
+            and ts_60s != ts_30s
+        ):
             vel_first_30s = vel_60s - vel_30s
             acceleration = vel_30s - vel_first_30s
 
@@ -98,11 +117,11 @@ class TickVelocityProcessor(BaseSignalProcessor):
         direction = SignalDirection.BULLISH if primary_vel > 0 else SignalDirection.BEARISH
         abs_vel = abs(primary_vel)
 
-        if abs_vel >= 0.04:
+        if abs_vel >= 0.020:
             strength = SignalStrength.VERY_STRONG
-        elif abs_vel >= 0.025:
+        elif abs_vel >= 0.012:
             strength = SignalStrength.STRONG
-        elif abs_vel >= 0.015:
+        elif abs_vel >= 0.008:
             strength = SignalStrength.MODERATE
         else:
             strength = SignalStrength.WEAK
@@ -112,7 +131,7 @@ class TickVelocityProcessor(BaseSignalProcessor):
         accel_same_dir = (acceleration > 0 and primary_vel > 0) or (
             acceleration < 0 and primary_vel < 0
         )
-        if accel_same_dir and abs(acceleration) > 0.005:
+        if accel_same_dir and abs(acceleration) > 0.003:
             confidence = min(0.88, confidence + 0.06)
 
         if vel_60s is not None and vel_30s is not None and (vel_60s > 0) != (vel_30s > 0):
@@ -130,8 +149,8 @@ class TickVelocityProcessor(BaseSignalProcessor):
             confidence=confidence,
             current_price=current_price,
             metadata={
-                "velocity_60s": round(vel_60s, 6) if vel_60s else None,
-                "velocity_30s": round(vel_30s, 6) if vel_30s else None,
+                "velocity_60s": round(vel_60s, 6) if vel_60s is not None else None,
+                "velocity_30s": round(vel_30s, 6) if vel_30s is not None else None,
                 "acceleration": round(acceleration, 6),
                 "ticks_in_buffer": len(tick_buffer),
             },
@@ -139,7 +158,7 @@ class TickVelocityProcessor(BaseSignalProcessor):
         self._record_signal(signal)
         logger.info(
             f"TickVelocity {direction.value.upper()}: "
-            f"vel={primary_vel*100:+.3f}%, accel={acceleration*100:+.4f}%, "
+            f"vel={primary_vel:+.4f}, accel={acceleration:+.5f}, "
             f"conf={confidence:.2%}"
         )
         return signal

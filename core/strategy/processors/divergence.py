@@ -32,10 +32,11 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
         low_prob_threshold: float = 0.32,
     ):
         super().__init__("PriceDivergence")
+        self.divergence_threshold = divergence_threshold  # 预留旋钮：当前逻辑未消费
         self.min_confidence = min_confidence
         self.momentum_threshold = momentum_threshold
         self.extreme_prob_threshold = extreme_prob_threshold
-        self.low_prob_threshold = low_prob_threshold
+        self.low_prob_threshold = max(0.01, low_prob_threshold)
         self._spot_history: List[float] = []
         self._max_spot_history = 10
         logger.info(
@@ -43,6 +44,10 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
             f"momentum={momentum_threshold:.1%}, "
             f"extreme_fade={extreme_prob_threshold:.0%}/{low_prob_threshold:.0%}"
         )
+
+    def reset_history(self) -> None:
+        """换盘时清空现货历史——跨市场的动量没有意义。"""
+        self._spot_history.clear()
 
     def process(
         self,
@@ -55,19 +60,24 @@ class PriceDivergenceProcessor(BaseSignalProcessor):
 
         poly_prob = float(current_price)
         spot_price = metadata.get("spot_price")
-        poly_momentum = float(metadata.get("momentum", 0.0))
 
-        if spot_price is not None:
-            self._spot_history.append(float(spot_price))
-            if len(self._spot_history) > self._max_spot_history:
-                self._spot_history.pop(0)
+        # 现货缺失时弃权。原实现回退用 poly 动量，等于跟 TickVelocity 读同一
+        # 条价格流、在融合层重复计票（伪独立信号）。
+        if spot_price is None or float(spot_price) <= 0:
+            return None
 
-        spot_momentum = 0.0
-        if spot_price is not None and len(self._spot_history) >= 3:
-            oldest = self._spot_history[-min(3, len(self._spot_history))]
-            spot_momentum = (float(spot_price) - oldest) / oldest
-        elif spot_price is None:
-            spot_momentum = poly_momentum
+        self._spot_history.append(float(spot_price))
+        if len(self._spot_history) > self._max_spot_history:
+            self._spot_history.pop(0)
+
+        # 样本不足时动量未知——未知应弃权，而不是按 0.0 通过"无确认动量"
+        # 闸门放行 fade 信号（进程刚启动/换盘后的头几个周期正是重灾区）。
+        if len(self._spot_history) < 3:
+            return None
+        oldest = self._spot_history[-3]
+        if oldest <= 0:
+            return None
+        spot_momentum = (float(spot_price) - oldest) / oldest
 
         logger.info(
             f"PriceDivergence: poly={poly_prob:.3f}, "

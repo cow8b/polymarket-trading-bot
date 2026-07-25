@@ -141,27 +141,43 @@ class DeribitPCRProcessor(BaseSignalProcessor):
     def _generate_signal(
         self, current_price: Decimal, pcr_data: Dict
     ) -> Optional[TradingSignal]:
-        pcr = pcr_data.get("short_pcr") or pcr_data.get("overall_pcr", 1.0)
+        # 不能用 `or` 短路：short_pcr == 0.0（近月全 call = 极度贪婪 = 最强
+        # 逆向看跌）是合法且最极端的读数，falsy 会把它静默换成 overall_pcr，
+        # 只吞看跌、不吞看涨——结构性偏多。
+        short_pcr = pcr_data.get("short_pcr")
+        pcr = short_pcr if short_pcr is not None else pcr_data.get("overall_pcr", 1.0)
+        pcr = max(float(pcr), 0.01)
 
+        # 两侧统一用比值刻度（ratio − 1）：PCR 下界为 0，旧的线性差刻度让
+        # 看跌 extremeness 数学上封顶 1.0（置信度够不到 0.80 的 cap），
+        # 看涨却无上界；强度档位同理按比值对称。
         if pcr >= self.bullish_pcr_threshold:
             direction = SignalDirection.BULLISH
-            extremeness = (pcr - self.bullish_pcr_threshold) / self.bullish_pcr_threshold
+            extremeness = pcr / self.bullish_pcr_threshold - 1.0
             confidence = min(0.80, 0.57 + extremeness * 0.15)
             strength = (
                 SignalStrength.VERY_STRONG
-                if pcr >= 1.60
-                else (SignalStrength.STRONG if pcr >= 1.40 else SignalStrength.MODERATE)
+                if pcr >= self.bullish_pcr_threshold * 1.333
+                else (
+                    SignalStrength.STRONG
+                    if pcr >= self.bullish_pcr_threshold * 1.167
+                    else SignalStrength.MODERATE
+                )
             )
             logger.info(f"DeribitPCR HIGH PCR={pcr:.3f} → contrarian BULLISH")
 
         elif pcr <= self.bearish_pcr_threshold:
             direction = SignalDirection.BEARISH
-            extremeness = (self.bearish_pcr_threshold - pcr) / self.bearish_pcr_threshold
+            extremeness = self.bearish_pcr_threshold / pcr - 1.0
             confidence = min(0.80, 0.57 + extremeness * 0.15)
             strength = (
                 SignalStrength.VERY_STRONG
-                if pcr <= 0.45
-                else (SignalStrength.STRONG if pcr <= 0.55 else SignalStrength.MODERATE)
+                if pcr <= self.bearish_pcr_threshold / 1.333
+                else (
+                    SignalStrength.STRONG
+                    if pcr <= self.bearish_pcr_threshold / 1.167
+                    else SignalStrength.MODERATE
+                )
             )
             logger.info(f"DeribitPCR LOW PCR={pcr:.3f} → contrarian BEARISH")
 
