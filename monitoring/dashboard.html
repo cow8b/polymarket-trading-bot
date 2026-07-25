@@ -534,7 +534,9 @@
     function render(s) {
       const p = s.portfolio || {}, r = s.risk || {}, t = s.trade_stats || {}, f = s.fusion_ml || {}, e = s.execution || {}, o = s.latest_order || {}, live = s.live_state || {};
       state.scanTick += 1;
-      const btcSpot = Number(live.btc_price || o.btc_spot_usd || 0);
+      // 只用实时行情，不回退到 latest_order 的历史现货价——那是下单瞬间的
+      // 快照且永不清零，行情中断时会显示陈旧价并算出虚构的开盘涨跌幅
+      const btcSpot = Number(live.btc_price || 0);
       const hasBtcSpot = hasValue(btcSpot);
       $("btcSpot").textContent = hasBtcSpot ? fmt.usd(btcSpot) : "等待数据";
       $("ethSpot").textContent = hasValue(live.eth_price) ? fmt.usd(live.eth_price) : "等待数据";
@@ -586,13 +588,12 @@
         `累计成交 ${fmt.int(e.orders_filled_total)}`,
         `敞口 ${fmt.usd(e.total_exposure)}`,
       ].join(" · ");
-      const upQuote = Number(live.up_price || o.ask_price || o.poly_yes_price || 0);
-      const downQuote = Number(live.down_price || o.bid_price || 0);
+      // 只用 UP/DOWN 两个代币各自的实时报价。禁止回退到 latest_order 的
+      // ask/bid——那是同一个代币的买卖价（恒 ask≥bid），会让"上行突破"
+      // 永远点亮且并排数值毫无意义
+      const upQuote = Number(live.up_price || 0);
+      const downQuote = Number(live.down_price || 0);
       const hasOrderQuote = hasValue(upQuote) && hasValue(downQuote);
-      if (hasValue(upQuote) && hasValue(downQuote)) {
-        state.spreadSeries.push(Math.abs(upQuote - downQuote));
-        state.spreadSeries = state.spreadSeries.slice(-240);
-      }
       $("hedgeValue").innerHTML = hasOrderQuote
         ? `<span class="scanner-quote"><span class="scanner-label">上涨（UP）</span><span class="scanner-price red">${fmt.num(upQuote, 2)}</span></span>`
           + `<span class="scanner-plus">+</span>`
@@ -797,11 +798,19 @@
         .sort((a,b) => new Date(a.ts || 0).getTime() - new Date(b.ts || 0).getTime())
         .slice(-80);
       $("logCount").textContent = fmt.int(events.length);
+      const logsEl = $("logs");
+      // 内容未变化时不重建 DOM：保留滚动位置与用户的文本选中
+      const last = events[events.length - 1];
+      const logSignature = `${events.length}:${last?.ts || ""}:${last?.type || ""}`;
+      if (state.lastLogSignature === logSignature) return;
+      state.lastLogSignature = logSignature;
+      const logsAtBottom =
+        logsEl.scrollHeight - logsEl.scrollTop - logsEl.clientHeight < 30;
       if (!events.length) {
-        $("logs").innerHTML = `<div class="log-line muted"><b>${new Date().toISOString().slice(11,19)}.000</b> 暂无真实订单/成交事件</div>`;
+        logsEl.innerHTML = `<div class="log-line muted"><b>--:--:--</b> 暂无真实订单/成交事件</div>`;
         return;
       }
-      $("logs").innerHTML = events.map(ev => {
+      logsEl.innerHTML = events.map(ev => {
         const ts = String(ev.ts || "").slice(11, 19) || "--:--:--";
         const type = String(ev.type || "");
         const p = ev.payload || {};
@@ -824,11 +833,13 @@
           hasValue(p.size_usd) ? `金额 ${fmt.usd(p.size_usd)}` : "",
           hasValue(p.notional_usd) ? `成交额 ${fmt.usd(p.notional_usd)}` : "",
           Number.isFinite(Number(p.realized_pnl)) ? `收益 ${fmt.usd(p.realized_pnl)}` : "",
+          p.reason ? `原因 ${p.reason}` : "",
           type === "history_pending" ? "重启后仅供复盘，不作为活动持仓" : "",
         ].filter(Boolean).join(" · ");
         return `<div class="log-line"><b>${ts}</b> <span class="${cls}">${eventName(type)}</span>${details ? " · " + details : ""}</div>`;
       }).join("");
-      $("logs").scrollTop = $("logs").scrollHeight;
+      // 仅当用户本来就停在底部时才自动跟随滚动，翻看历史时不打断
+      if (logsAtBottom) logsEl.scrollTop = logsEl.scrollHeight;
     }
     function shortId(value) {
       const text = String(value || "");
@@ -848,12 +859,19 @@
         "STEP 2": {label:"模型概率预测", nodes:["nodeMl"], edges:["e6","e8"]},
         "STEP 3": {label:"比较市场价格", nodes:["nodeMl"], edges:["e8"]},
         "STEP 4": {label:"优势与方向确认", nodes:["nodeMl"], edges:["e8"]},
-        "STEP 5": {label:"提交交易订单", nodes:["nodeOrder"], edges:["e9"]},
-        "STEP 6": {label:"建立并跟踪仓位", nodes:["nodePosition"], edges:["e10"]},
+        // STEP 5 在策略侧是风控/执行闸门（EXECUTION GATE），STEP 6 才是
+        // 真正下单建仓——此前映射早一格，风控还在检查时"提交订单"已发光
+        "STEP 5": {label:"风控与执行闸门", nodes:["nodeMl"], edges:["e8"]},
+        "STEP 6": {label:"提交订单并建仓", nodes:["nodeOrder","nodePosition"], edges:["e9","e10"]},
         "SETTLE": {label:"退出并结算收益", nodes:["nodeSettle"], edges:["e11","e12"]},
       };
       const stages = Array.isArray(decision.stages) ? decision.stages : [];
-      if (!stages.length) {
+      // 决策过期判定：上一轮的 stages 永不清空，若 updated_at 已超过 20s
+      // 且没有进行中的阶段，则回到待命展示，避免窗口关闭后十几分钟里
+      // 流程图仍满图 completed + 粒子流动，与"正在决策"无法区分
+      const decisionAgeMs = Date.now() - (Date.parse(decision.updated_at || "") || 0);
+      const decisionStale = Boolean(decision.updated_at) && decisionAgeMs > 20000 && !decision.current_stage;
+      if (!stages.length || decisionStale) {
         const hasMarketPulse = Boolean(
           live.quote_updated_at || live.orderbook_updated_at || live.candles_updated_at
         );

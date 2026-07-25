@@ -1688,6 +1688,7 @@ class IntegratedBTCStrategy(Strategy):
             "settlement_running": self.signal_recorder.is_running,
             "streams_ok": True,
             "completed_trades": len(settled),
+            "trade_history_total": len(all_trades),
             "wins": wins,
             "win_rate": win_rate,
             "total_pnl": total_pnl,
@@ -3824,7 +3825,9 @@ class IntegratedBTCStrategy(Strategy):
 
     # ── Order events ──────────────────────────────────────────────────────────
 
-    def _track_order_event(self, event_type: str) -> None:
+    def _track_order_event(
+        self, event_type: str, *, reason: str = "", client_id: str = ""
+    ) -> None:
         try:
             pt = self.performance_tracker
             if hasattr(pt, "record_order_event"):
@@ -3842,9 +3845,12 @@ class IntegratedBTCStrategy(Strategy):
                 if event_type in ("filled", "rejected"):
                     self.grafana_exporter.increment_order_counter(event_type)
                 if event_type in ("rejected", "denied") and hasattr(self.grafana_exporter, "record_dashboard_event"):
+                    # 带上拒单原因与订单号，否则驾驶舱日志只剩一行光秃秃的"订单被拒绝"
                     self.grafana_exporter.record_dashboard_event(
                         f"order_{event_type}",
                         f"Order {event_type}",
+                        reason=reason or "",
+                        client_id=client_id or "",
                     )
         except Exception:
             pass
@@ -4400,7 +4406,11 @@ class IntegratedBTCStrategy(Strategy):
                 ("Action",   "discarded; nothing further submitted"),
             ],
         )
-        self._track_order_event("rejected")
+        self._track_order_event(
+            "rejected",
+            reason=str(getattr(event, "reason", "")),
+            client_id=str(getattr(event, "client_order_id", "")),
+        )
         self._discard_pending_order(event)
 
     def on_order_rejected(self, event) -> None:
@@ -4433,7 +4443,7 @@ class IntegratedBTCStrategy(Strategy):
                 ("Action",   note),
             ],
         )
-        self._track_order_event("rejected")
+        self._track_order_event("rejected", reason=reason, client_id=client_id)
         self._discard_pending_order(event)
 
     def on_order_canceled(self, event) -> None:

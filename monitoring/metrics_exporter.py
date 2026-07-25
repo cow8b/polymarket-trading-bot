@@ -1019,7 +1019,12 @@ class GrafanaMetricsExporter:
             snapshot["trade_stats"]["win_rate"] = float(
                 live_state.get("win_rate", 0.0) or 0.0
             )
-            history_count = len(live_state.get("trade_history", []) or [])
+            # trade_history 只导出最近 200 笔（限制 payload），计数必须用
+            # 全量字段，否则总成交在 200 笔后永久冻结。
+            history_rows = live_state.get("trade_history", []) or []
+            history_count = int(
+                live_state.get("trade_history_total", len(history_rows)) or 0
+            )
             completed = int(live_state.get("completed_trades", 0) or 0)
             wins = int(live_state.get("wins", 0) or 0)
             positions = live_state.get("positions", []) or []
@@ -1059,6 +1064,38 @@ class GrafanaMetricsExporter:
                 snapshot["execution"]["orders_filled_total"] = max(
                     snapshot["execution"]["orders_filled_total"], history_count
                 )
+
+            # 回撤/期望/盈利因子/平均持仓与收益同源：全部改用账本数据。
+            # 内存版 PerformanceTracker 重启即清零，否则会出现"胜率 62% 但
+            # 期望 $0.00、盈利因子 0.00"的自相矛盾展示。
+            snapshot["risk"]["max_drawdown"] = float(
+                live_state.get("drawdown_pct", 0.0) or 0.0
+            )
+            settled_rows = [
+                r for r in history_rows
+                if r.get("outcome") in ("WIN", "LOSS", "BREAKEVEN")
+            ]
+            pnls = [float(r.get("pnl_usd", 0.0) or 0.0) for r in settled_rows]
+            if pnls:
+                gross_win = sum(x for x in pnls if x > 0)
+                gross_loss = -sum(x for x in pnls if x < 0)
+                snapshot["trade_stats"]["expectancy_usd"] = sum(pnls) / len(pnls)
+                snapshot["trade_stats"]["profit_factor"] = (
+                    gross_win / gross_loss if gross_loss > 1e-9
+                    else (99.99 if gross_win > 0 else 0.0)
+                )
+                holds = []
+                for r in settled_rows:
+                    try:
+                        opened = datetime.fromisoformat(str(r.get("timestamp")))
+                        closed = datetime.fromisoformat(
+                            str(r.get("closed_at") or r.get("timestamp"))
+                        )
+                        holds.append(max(0.0, (closed - opened).total_seconds()))
+                    except (TypeError, ValueError):
+                        continue
+                if holds:
+                    snapshot["trade_stats"]["avg_hold_seconds"] = sum(holds) / len(holds)
         return snapshot
 
     # ──────────────────────────────────────────────────────────────────────────
