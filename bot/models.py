@@ -220,6 +220,20 @@ def _make_stub_signal(direction: str, ml_p_up: Optional[float] = None):
     return _Stub(direction=d, score=conf * 100, confidence=conf)
 
 
+def is_book_sane(bid, ask, max_spread: float) -> bool:
+    """出场检查用的盘口有效性判定。
+
+    Polymarket 的 NO 侧订单簿经常只剩 $0.01 级别的钓鱼单（流动性集中在
+    YES 侧），裸 bid 会让止损在开仓瞬间被虚假触发并按垃圾价成交。点差
+    超过 ``max_spread``（绝对值）或价格越界的 tick 视为无效盘口。
+    """
+    try:
+        b, a = float(bid), float(ask)
+    except (TypeError, ValueError):
+        return False
+    return 0.0 < b < 1.0 and a >= b and (a - b) <= max_spread
+
+
 def interp_exit_fracs(
     entry_price: float,
     min_entry: float,

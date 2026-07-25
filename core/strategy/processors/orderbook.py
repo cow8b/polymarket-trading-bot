@@ -21,7 +21,8 @@ class OrderBookImbalanceProcessor(BaseSignalProcessor):
     """
     Detects order-book imbalance on the Polymarket CLOB for the YES token.
 
-    imbalance = (bid_volume - ask_volume) / (bid_volume + ask_volume)
+    以盘口最优 N 档、价带内的份额（share）计算：
+    imbalance = (bid_shares - ask_shares) / (bid_shares + ask_shares)
       > +0.30  → BULLISH (heavy buy pressure)
       < -0.30  → BEARISH (heavy sell pressure)
     """
@@ -57,9 +58,46 @@ class OrderBookImbalanceProcessor(BaseSignalProcessor):
             logger.warning(f"OrderBook fetch failed for {token_id[:16]}…: {e}")
             return None
 
-    def _parse_levels(self, levels: List[Dict]) -> float:
+    @staticmethod
+    def _level_price(level: Dict) -> float:
+        try:
+            return float(level.get("price", 0))
+        except (ValueError, TypeError):
+            return 0.0
+
+    def _nearest_levels(self, levels: List[Dict], *, is_bid: bool) -> List[Dict]:
+        """取靠近盘口的 top_levels 档。
+
+        CLOB /book 返回 bids 升序、asks 降序——最优价在数组末尾。旧实现
+        直接 levels[:N]，拿到的是离盘口最远的 N 档钓鱼单（0.001 的 bid、
+        0.999 的 ask），失衡信号因此长期错向（2026-07-25 模拟盘 6 笔全
+        SHORT 的根因之一）。"""
+        ordered = sorted(levels, key=self._level_price, reverse=is_bid)
+        return ordered[: self.top_levels]
+
+    def _band_share_volume(self, levels: List[Dict], band: float = 0.15) -> float:
+        """以该侧最优价为基准，统计价带内各档的份额（share）总量。
+
+        失衡必须按份额而非美元额（price×size）计——ask 价恒高于 bid，
+        美元加权会结构性放大 ask 侧、把信号推向偏空。价带过滤掉漏进
+        top 档的深水钓鱼单。"""
+        if not levels:
+            return 0.0
+        touch = self._level_price(levels[0])
         total = 0.0
-        for level in levels[: self.top_levels]:
+        for level in levels:
+            try:
+                price = float(level.get("price", 0))
+                size = float(level.get("size", 0))
+            except (ValueError, TypeError):
+                continue
+            if abs(price - touch) <= band:
+                total += size
+        return total
+
+    def _parse_levels_usd(self, levels: List[Dict]) -> float:
+        total = 0.0
+        for level in levels:
             try:
                 total += float(level.get("price", 0)) * float(level.get("size", 0))
             except (ValueError, TypeError):
@@ -69,7 +107,7 @@ class OrderBookImbalanceProcessor(BaseSignalProcessor):
     def _detect_wall(self, levels: List[Dict], total_volume: float) -> Optional[float]:
         if total_volume <= 0:
             return None
-        for level in levels[: self.top_levels]:
+        for level in levels:
             try:
                 order_usd = float(level.get("price", 0)) * float(level.get("size", 0))
                 if order_usd / total_volume >= self.wall_threshold:
@@ -96,17 +134,24 @@ class OrderBookImbalanceProcessor(BaseSignalProcessor):
             if not book:
                 return None
 
-            bid_volume = self._parse_levels(book.get("bids", []))
-            ask_volume = self._parse_levels(book.get("asks", []))
-            total_volume = bid_volume + ask_volume
+            top_bids = self._nearest_levels(book.get("bids", []), is_bid=True)
+            top_asks = self._nearest_levels(book.get("asks", []), is_bid=False)
 
-            if total_volume < self.min_book_volume:
+            # 流动性门槛沿用美元口径（top 档），失衡改用份额口径。
+            usd_volume = self._parse_levels_usd(top_bids) + self._parse_levels_usd(top_asks)
+            if usd_volume < self.min_book_volume:
+                return None
+
+            bid_volume = self._band_share_volume(top_bids)
+            ask_volume = self._band_share_volume(top_asks)
+            total_volume = bid_volume + ask_volume
+            if total_volume <= 0:
                 return None
 
             imbalance = (bid_volume - ask_volume) / total_volume
             logger.info(
-                f"OrderBook: bids=${bid_volume:.1f}, asks=${ask_volume:.1f}, "
-                f"imbalance={imbalance:+.3f}"
+                f"OrderBook: bids={bid_volume:.0f}sh, asks={ask_volume:.0f}sh, "
+                f"(${usd_volume:.0f} top-book) imbalance={imbalance:+.3f}"
             )
 
             if abs(imbalance) < self.imbalance_threshold:
@@ -126,8 +171,8 @@ class OrderBookImbalanceProcessor(BaseSignalProcessor):
                 strength = SignalStrength.WEAK
 
             confidence = min(0.85, 0.55 + abs_imb * 0.40)
-            bid_wall = self._detect_wall(book.get("bids", []), total_volume)
-            ask_wall = self._detect_wall(book.get("asks", []), total_volume)
+            bid_wall = self._detect_wall(top_bids, usd_volume)
+            ask_wall = self._detect_wall(top_asks, usd_volume)
             wall_side = bid_wall if direction == SignalDirection.BULLISH else ask_wall
             if wall_side:
                 confidence = min(0.90, confidence + 0.05)
@@ -144,9 +189,10 @@ class OrderBookImbalanceProcessor(BaseSignalProcessor):
                 confidence=confidence,
                 current_price=current_price,
                 metadata={
-                    "bid_volume_usd": round(bid_volume, 2),
-                    "ask_volume_usd": round(ask_volume, 2),
-                    "total_volume_usd": round(total_volume, 2),
+                    "bid_shares": round(bid_volume, 2),
+                    "ask_shares": round(ask_volume, 2),
+                    "total_shares": round(total_volume, 2),
+                    "top_book_usd": round(usd_volume, 2),
                     "imbalance": round(imbalance, 4),
                     "bid_wall_usd": round(bid_wall, 2) if bid_wall else None,
                     "ask_wall_usd": round(ask_wall, 2) if ask_wall else None,

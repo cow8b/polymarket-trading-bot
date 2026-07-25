@@ -37,6 +37,7 @@ from bot.models import (
     PaperTrade,
     _make_stub_signal,
     interp_exit_fracs,
+    is_book_sane,
 )
 from core.analytics import calculate_prediction_edge, calculate_strategy_edge
 from core.database import OrderLifecycleRepository, TradeHistoryRepository
@@ -234,6 +235,21 @@ class IntegratedBTCStrategy(Strategy):
                 f"TP {endpoints[2]:.0%}→{endpoints[3]:.0%} "
                 f"(带 [{self._min_entry_price:.2f}, {self._max_entry_price:.2f}])"
             )
+
+        # ── 出场检查护栏 ─────────────────────────────────────────────────
+        # Polymarket 的 NO 侧订单簿经常只剩 $0.01 级别的钓鱼单，裸 bid 会让
+        # 止损在开仓瞬间被虚假触发并按垃圾价"成交"（2026-07-25 模拟盘 6 笔
+        # 全灭的根因）。两道护栏：
+        #   1) 点差超过 MAX_EXIT_SPREAD 的 tick 视为无效盘口，整体跳过；
+        #   2) SL/TP 需连续 EXIT_CONFIRM_TICKS 个有效 tick 确认才触发。
+        try:
+            self._max_exit_spread = max(0.01, min(0.90, float(os.getenv("MAX_EXIT_SPREAD", "0.12"))))
+        except (TypeError, ValueError):
+            self._max_exit_spread = 0.12
+        try:
+            self._exit_confirm_ticks = max(1, int(float(os.getenv("EXIT_CONFIRM_TICKS", "2"))))
+        except (TypeError, ValueError):
+            self._exit_confirm_ticks = 2
 
         # ── Trade-window / cooldown ──────────────────────────────────────
         # Entry window: seconds 780-870 of each 15-min market (13:00 – 14:30).
@@ -4614,6 +4630,12 @@ class IntegratedBTCStrategy(Strategy):
         if not self._open_positions:
             return
 
+        # 护栏 1：点差过宽或价格越界的 tick 视为无效盘口（NO 侧订单簿常
+        # 只剩钓鱼单）。直接跳过——既不触发出场，也不把垃圾 bid 写进
+        # last_bid（结算收割器会用它计算已实现盈亏）。
+        if not is_book_sane(bid, ask, self._max_exit_spread):
+            return
+
         now_ts = int(datetime.now(timezone.utc).timestamp())
 
         for entry_id, position in list(self._open_positions.items()):
@@ -4664,6 +4686,13 @@ class IntegratedBTCStrategy(Strategy):
                 trigger = "TAKE-PROFIT"
 
             if trigger is None:
+                position["exit_confirm_streak"] = 0
+                continue
+
+            # 护栏 2：连续确认——单个异常 tick（漏网的钓鱼单）不足以出场。
+            streak = int(position.get("exit_confirm_streak", 0)) + 1
+            position["exit_confirm_streak"] = streak
+            if streak < self._exit_confirm_ticks:
                 continue
 
             logger.warning(
