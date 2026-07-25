@@ -195,7 +195,11 @@ def _slug_end_at(slug: str) -> Optional[datetime]:
 
 
 class OfflineTradeReconciler:
-    """扫描 MySQL 中的 PENDING 记录，按官方结果重算并可选写回。"""
+    """扫描 MySQL 中的 PENDING/UNRESOLVED 记录，按官方结果重算并可选写回。
+
+    UNRESOLVED 是机器人在所有结算源（Chainlink/盘口 bid）都不可用时按入场价
+    平账的降级记录；这里允许它与 PENDING 一样按 Gamma 官方结果重算。
+    """
 
     def __init__(
         self,

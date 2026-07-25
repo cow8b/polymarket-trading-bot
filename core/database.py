@@ -311,6 +311,11 @@ def dispose_database_engine() -> None:
 class TradeHistoryRepository:
     """模拟与实盘成交历史的 MySQL 仓库。"""
 
+    # 视为"尚未官方结算"的状态：PENDING（待结算）与 UNRESOLVED（结算源全部
+    # 不可用时按入场价平账的降级记录）。补结算允许重算这两类；upsert 不允许
+    # 用这两类覆盖已官方结算的行。
+    PROVISIONAL_OUTCOMES = ("PENDING", "UNRESOLVED")
+
     def __init__(self, engine: Optional[Engine] = None):
         self.engine = initialize_database(engine=engine)
 
@@ -329,10 +334,10 @@ class TradeHistoryRepository:
         trade_type: str,
         trade_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """只读取待结算交易，避免补结算命令扫描完整历史。"""
+        """只读取待结算/降级结算的交易，避免补结算命令扫描完整历史。"""
         stmt = select(trade_history.c.payload_json).where(
             trade_history.c.trade_type == trade_type,
-            trade_history.c.outcome == "PENDING",
+            trade_history.c.outcome.in_(self.PROVISIONAL_OUTCOMES),
         )
         if trade_id:
             stmt = stmt.where(trade_history.c.trade_id == trade_id)
@@ -374,11 +379,16 @@ class TradeHistoryRepository:
         return len(rows)
 
     def upsert(self, trade_type: str, trades: Iterable[Dict[str, Any]]) -> int:
-        """仅写入新增或变化的交易，避免交易越多时反复重写整张表。"""
+        """仅写入新增或变化的交易，避免交易越多时反复重写整张表。
+
+        并发保护：当传入记录仍是 PENDING/UNRESOLVED（例如停机保存时机器人
+        内存里的过期副本），不得覆盖已被补结算进程写回官方结果的行——否则
+        `reconcile_trades.py --watch` 与机器人并行时结算结果会被回滚。
+        """
         rows = self._serialize_rows(trade_type, trades)
         with self.engine.begin() as conn:
             for row in rows:
-                result = conn.execute(
+                stmt = (
                     update(trade_history)
                     .where(
                         trade_history.c.trade_type == row["trade_type"],
@@ -391,12 +401,24 @@ class TradeHistoryRepository:
                         updated_at=row["updated_at"],
                     )
                 )
+                if row["outcome"] in self.PROVISIONAL_OUTCOMES:
+                    stmt = stmt.where(
+                        trade_history.c.outcome.in_(self.PROVISIONAL_OUTCOMES)
+                    )
+                result = conn.execute(stmt)
                 if result.rowcount == 0:
-                    conn.execute(insert(trade_history), row)
+                    exists = conn.execute(
+                        select(trade_history.c.trade_id).where(
+                            trade_history.c.trade_type == row["trade_type"],
+                            trade_history.c.trade_id == row["trade_id"],
+                        )
+                    ).first()
+                    if exists is None:
+                        conn.execute(insert(trade_history), row)
         return len(rows)
 
     def settle_pending(self, trade_type: str, trade: Dict[str, Any]) -> bool:
-        """仅在记录仍为 PENDING 时写入结算结果，防止并发覆盖。"""
+        """仅在记录仍为 PENDING/UNRESOLVED 时写入结算结果，防止并发覆盖。"""
         rows = self._serialize_rows(trade_type, [trade])
         if not rows:
             return False
@@ -407,7 +429,7 @@ class TradeHistoryRepository:
                 .where(
                     trade_history.c.trade_type == row["trade_type"],
                     trade_history.c.trade_id == row["trade_id"],
-                    trade_history.c.outcome == "PENDING",
+                    trade_history.c.outcome.in_(self.PROVISIONAL_OUTCOMES),
                 )
                 .values(
                     timestamp=row["timestamp"],

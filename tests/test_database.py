@@ -139,6 +139,49 @@ class RepositoryTests(unittest.TestCase):
             ["pending"],
         )
 
+    def test_upsert_pending_does_not_clobber_settled_row(self) -> None:
+        """停机保存的过期 PENDING 内存副本不得回滚补结算写入的官方结果。"""
+        repository = TradeHistoryRepository(self.engine)
+        pending = {
+            "trade_id": "paper_1",
+            "timestamp": "2026-07-14T10:00:00+00:00",
+            "outcome": "PENDING",
+        }
+        repository.upsert("paper", [pending])
+        # 补结算进程写回官方结果
+        repository.settle_pending(
+            "paper", {**pending, "outcome": "WIN", "pnl_usd": 10.0}
+        )
+        # 机器人 on_stop 用过期内存副本全量 upsert
+        repository.upsert("paper", [pending])
+        row = repository.load("paper")[0]
+        self.assertEqual(row["outcome"], "WIN")
+        self.assertEqual(row["pnl_usd"], 10.0)
+        # 官方结算之间的正常覆盖（非 provisional）仍然生效
+        repository.upsert("paper", [{**pending, "outcome": "LOSS"}])
+        self.assertEqual(repository.load("paper")[0]["outcome"], "LOSS")
+
+    def test_unresolved_rows_are_reloadable_and_resettleable(self) -> None:
+        """按入场价平账的 UNRESOLVED 降级记录应可被补结算重算。"""
+        repository = TradeHistoryRepository(self.engine)
+        unresolved = {
+            "trade_id": "paper_1",
+            "timestamp": "2026-07-14T10:00:00+00:00",
+            "outcome": "UNRESOLVED",
+            "close_reason": "SETTLEMENT_UNRESOLVED",
+            "pnl_usd": 0.0,
+        }
+        repository.upsert("paper", [unresolved])
+        self.assertEqual(
+            [row["trade_id"] for row in repository.load_pending("paper")],
+            ["paper_1"],
+        )
+        settled = {**unresolved, "outcome": "LOSS", "pnl_usd": -5.0}
+        self.assertTrue(repository.settle_pending("paper", settled))
+        self.assertEqual(repository.load("paper")[0]["outcome"], "LOSS")
+        # 已重算后不可再次覆盖
+        self.assertFalse(repository.settle_pending("paper", settled))
+
     def test_order_lifecycle_tracks_partial_and_full_fill(self) -> None:
         repository = OrderLifecycleRepository(self.engine)
         repository.record_submitted(
