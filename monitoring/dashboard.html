@@ -47,8 +47,9 @@
       position: relative;
       margin-bottom: 26px;
     }
+    /* 统计横条内容来自 data-stats 属性，由轮询用真实统计填充（原为写死的假数据） */
     .topbar::after {
-      content: "▲ SPECIALIST · 高频做市 · 过时价格捕获 · 配对优势 +5.05% AVG · 配对市场 89.9% · 平均持仓 1M 55S · 246.9 FILLS/HR";
+      content: attr(data-stats);
       position: absolute; left: 0; right: 0; bottom: -24px;
       height: 19px; display: flex; align-items: center;
       padding: 0 12px; background: #050505; color: #f2ead8;
@@ -158,6 +159,10 @@
     .scanner-plus { align-self: end; padding-bottom: 2px; color: var(--ink); font-size: 19px; font-weight: 900; }
     .scanner-empty { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
     .scan-head { display: flex; justify-content: space-between; color: var(--muted); font-size: 10px; margin-bottom: 6px; }
+    .scan-open { font-size: 11px; color: var(--muted); margin-bottom: 6px; font-variant-numeric: tabular-nums; }
+    .scan-open b { font-weight: 700; }
+    .scan-open b.up { color: var(--green); }
+    .scan-open b.down { color: var(--red); }
     .direction-boxes { display: flex; gap: 5px; margin: 6px 0; }
     .direction-box { padding: 3px 7px; border: 1px solid #222; background: transparent; font-size: 9px; }
     .direction-box.on.up { color: var(--green); border-color: rgba(0,255,102,.55); box-shadow: 0 0 8px rgba(0,255,102,.25); }
@@ -247,7 +252,7 @@
 </head>
 <body>
   <div class="shell">
-    <header class="topbar">
+    <header class="topbar" data-stats="▲ 策略统计 · 等待首轮数据">
       <div class="brand"><b>BONEREAPER // POLYMARKET BOT </b><span>内置中文交易驾驶舱 · 轮询刷新 · 单进程查看</span></div>
       <div class="price-strip">
         <div class="price-card"><div class="k">BTC 现货</div><div id="btcSpot" class="v">等待数据</div><div class="chg">真实行情</div></div>
@@ -285,6 +290,7 @@
         <span class="live">扫描中</span>
         <h2>对冲扫描器</h2>
         <div class="scan-head"><span>BTC 15分钟</span><span id="scanSpot">现货 $0.00</span></div>
+        <div class="scan-open" id="scanOpen">开盘 — · 现价 —</div>
         <div class="scanner-value" id="hedgeValue">等待数据</div>
         <div class="direction-boxes"><div id="upBox" class="direction-box up">上行突破</div><div id="downBox" class="direction-box down">下行突破</div></div>
         <div class="spark"><canvas id="spark"></canvas></div>
@@ -544,6 +550,32 @@
       $("openSummary").textContent = `${fmt.usd(p.unrealized_pnl)} / ${fmt.usd(e.total_exposure)}`;
       const period = `${live.market_label || "BTC 15M"} ${marketWindow(live)}`;
       $("scanSpot").textContent = `现货 ${hasBtcSpot ? fmt.usd(btcSpot) : "等待数据"}`;
+      // 15 分钟市场的结算基准：开盘参考价 vs 现价（涨=UP 赢，跌=DOWN 赢）
+      const openRef = Number(live.price_to_beat || 0);
+      if (openRef > 0 && hasBtcSpot) {
+        const diff = btcSpot - openRef;
+        const pct = (diff / openRef) * 100;
+        const dirCls = diff >= 0 ? "up" : "down";
+        const arrow = diff >= 0 ? "▲" : "▼";
+        const sign = diff >= 0 ? "+" : "";
+        $("scanOpen").innerHTML =
+          `开盘 ${fmt.usd(openRef)} → 现价 ${fmt.usd(btcSpot)} ` +
+          `<b class="${dirCls}">${arrow} ${sign}${diff.toFixed(2)}（${sign}${pct.toFixed(3)}%）</b>`;
+      } else {
+        $("scanOpen").textContent = "等待开盘参考价";
+      }
+      // 顶部统计横条：真实策略统计（替代原写死的假数据）
+      const holdSecs = Math.max(0, Math.round(Number(t.avg_hold_seconds || 0)));
+      const holdTxt = `${Math.floor(holdSecs / 60)}M ${String(holdSecs % 60).padStart(2, "0")}S`;
+      document.querySelector(".topbar").dataset.stats = [
+        "▲ 策略统计",
+        `胜率 ${fmt.num(t.win_rate, 1)}%`,
+        `期望 ${fmt.usd(t.expectancy_usd)}/笔`,
+        `盈利因子 ${fmt.num(t.profit_factor, 2)}`,
+        `平均持仓 ${holdTxt}`,
+        `累计成交 ${fmt.int(e.orders_filled_total)}`,
+        `敞口 ${fmt.usd(e.total_exposure)}`,
+      ].join(" · ");
       const upQuote = Number(live.up_price || o.ask_price || o.poly_yes_price || 0);
       const downQuote = Number(live.down_price || o.bid_price || 0);
       const hasOrderQuote = hasValue(upQuote) && hasValue(downQuote);
