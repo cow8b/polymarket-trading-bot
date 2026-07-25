@@ -1695,6 +1695,11 @@ class IntegratedBTCStrategy(Strategy):
             "confidence": confidence,
             "next_window": next_window,
             "trade_window_open": trade_window_open,
+            # 交易窗口在 15 分钟周期内的秒数区间，供回合钟绘制行为分区
+            "trade_window_sec": [
+                0 if self.test_mode else self._trade_window_start,
+                900 if self.test_mode else self._trade_window_end,
+            ],
             "waiting_for_market": waiting_for_market,
             "instruments_loaded": self._instruments_loaded,
             "open_positions": open_count,

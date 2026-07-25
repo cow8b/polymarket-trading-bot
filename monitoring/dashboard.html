@@ -123,12 +123,32 @@
     .rc-label { color: var(--muted); font-size: 10px; letter-spacing: 1px; }
     .rc-id { font-size: 16px; font-weight: 900; margin: 4px 0 2px; }
     .rc-phase { font-size: 11px; color: var(--muted); }
-    .rc-track { position: relative; height: 14px; border: 1px solid rgba(22,19,15,.45); background: #f3eddd; overflow: hidden; }
-    .rc-elapsed { position: absolute; inset: 0 auto 0 0; width: 0; background: rgba(22,19,15,.12); }
-    .rc-needle { position: absolute; top: -2px; bottom: -2px; width: 3px; left: 0; background: var(--ink); transition: left .6s linear; }
-    .rc-needle.up { background: var(--red); box-shadow: 0 0 6px rgba(217,60,77,.6); }
-    .rc-needle.down { background: var(--green); box-shadow: 0 0 6px rgba(22,140,85,.6); }
-    .rc-baseline { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-top: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    /* 仪器表尺：分钟刻度 + 三段行为区 + 打印纹理的已流逝段 + 旗标走针 */
+    .rc-track { position: relative; height: 22px; border: 1px solid rgba(22,19,15,.5); background: #f6f0e2; }
+    .rc-zone { position: absolute; top: 0; bottom: 0; }
+    .rc-zone.trade { background: rgba(22,140,85,.13); border-left: 1px solid rgba(22,140,85,.5); border-right: 1px solid rgba(22,140,85,.5); }
+    .rc-zone.settle { background: rgba(138,90,0,.10); }
+    .rc-ticks { position: absolute; inset: 0; pointer-events: none;
+      background-image:
+        repeating-linear-gradient(90deg, rgba(22,19,15,.28) 0 1px, transparent 1px calc(100% / 15)),
+        linear-gradient(90deg, transparent calc(33.33% - 1px), rgba(22,19,15,.45) calc(33.33% - 1px) calc(33.33% + 1px), transparent calc(33.33% + 1px)),
+        linear-gradient(90deg, transparent calc(66.66% - 1px), rgba(22,19,15,.45) calc(66.66% - 1px) calc(66.66% + 1px), transparent calc(66.66% + 1px));
+      background-size: 100% 6px, 100% 100%, 100% 100%;
+      background-position: bottom, 0 0, 0 0; background-repeat: no-repeat; }
+    /* 已流逝段：45° 细斜纹＝行情单"已打印"的部分 */
+    .rc-elapsed { position: absolute; inset: 0 auto 0 0; width: 0;
+      background: repeating-linear-gradient(45deg, rgba(22,19,15,.16) 0 2px, transparent 2px 6px); }
+    .rc-needle { position: absolute; top: -6px; bottom: -3px; width: 3px; left: 0; background: var(--ink); transition: left .6s linear; }
+    .rc-needle::before { content: ""; position: absolute; top: -1px; left: 50%; transform: translateX(-50%);
+      border: 5px solid transparent; border-top: 7px solid currentColor; }
+    .rc-needle { color: var(--ink); }
+    .rc-needle.up { background: var(--red); color: var(--red); box-shadow: 0 0 6px rgba(217,60,77,.55); }
+    .rc-needle.down { background: var(--green); color: var(--green); box-shadow: 0 0 6px rgba(22,140,85,.55); }
+    .rc-scale { position: relative; height: 14px; margin-top: 3px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .rc-scale > span { position: absolute; transform: translateX(-50%); }
+    .rc-scale > span:first-child { transform: none; }
+    .rc-winmark { transform: none !important; text-align: center; color: #0e5c38; letter-spacing: 2px; }
+    .rc-baseline { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-top: 4px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
     .rc-baseline b { color: var(--ink); font-size: 14px; }
     .rc-delta { font-size: 20px; font-weight: 900; color: var(--ink); white-space: nowrap; }
     .rc-delta.up { color: var(--red); }
@@ -188,7 +208,9 @@
     .price-stream { border: 1px solid rgba(22,19,15,.42); background: rgba(255,255,255,.22); padding: 4px; height: 105px; overflow: hidden; }
     .stream-line { padding: 1px 0; color: var(--muted); }
     .book-side { min-width: 0; }
-    .book-head, .book-row { display: grid; grid-template-columns: 30px 72px 48px 52px 56px; gap: 3px; align-items: center; }
+    /* 列宽弹性化：原固定 258px 超出容器，金额列在面板右缘被裁 */
+    .book-head, .book-row { display: grid; grid-template-columns: 26px 56px minmax(34px,1fr) minmax(40px,1fr) minmax(44px,1fr); gap: 3px; align-items: center; }
+    .book-row > span, .book-head > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .book-head { color: var(--muted); border-bottom: 1px solid rgba(22,19,15,.45); padding: 2px 0; }
     .book-row { position: relative; min-height: 15px; border-bottom: 1px dashed rgba(22,19,15,.15); }
     .book-row > span { position: relative; z-index: 1; text-align: right; }
@@ -334,7 +356,18 @@
         <div id="rcPhase" class="rc-phase">等待市场</div>
       </div>
       <div class="rc-cell rc-band">
-        <div class="rc-track"><div id="rcElapsed" class="rc-elapsed"></div><div id="rcNeedle" class="rc-needle"></div></div>
+        <div class="rc-track">
+          <div id="rcZoneTrade" class="rc-zone trade" title="交易窗口：允许开新仓"></div>
+          <div id="rcZoneSettle" class="rc-zone settle" title="禁入等待结算"></div>
+          <div class="rc-ticks" aria-hidden="true"></div>
+          <div id="rcElapsed" class="rc-elapsed"></div>
+          <div id="rcNeedle" class="rc-needle"></div>
+        </div>
+        <div class="rc-scale" aria-hidden="true">
+          <span style="left:0">0</span><span style="left:33.33%">5m</span>
+          <span style="left:66.66%">10m</span><span style="left:100%">15m</span>
+          <span id="rcWinMark" class="rc-winmark" style="left:33.33%;width:53.33%">交易窗口</span>
+        </div>
         <div class="rc-baseline">
           <span>开盘 <b id="rcOpen">—</b></span>
           <span id="rcDelta" class="rc-delta">等待开盘参考价</span>
@@ -745,6 +778,17 @@
       $("upBox").className = "direction-box up" + (isUp ? " on" : "");
       $("downBox").className = "direction-box down" + (!isUp ? " on" : "");
       // ── 回合钟（HERO）：进度带 + 开盘价基线 + 价差走针 + 定价 + 倒计时 ──
+      // 行为分区：按策略真实交易窗口（秒）标出 可交易/禁入等待结算 区段
+      const win = Array.isArray(live.trade_window_sec) && live.trade_window_sec.length === 2
+        ? live.trade_window_sec : [300, 780];
+      const winL = Math.max(0, Math.min(100, (win[0] / 900) * 100));
+      const winR = Math.max(winL, Math.min(100, (win[1] / 900) * 100));
+      $("rcZoneTrade").style.left = winL + "%";
+      $("rcZoneTrade").style.width = (winR - winL) + "%";
+      $("rcZoneSettle").style.left = winR + "%";
+      $("rcZoneSettle").style.width = (100 - winR) + "%";
+      $("rcWinMark").style.left = winL + "%";
+      $("rcWinMark").style.width = (winR - winL) + "%";
       const rcStart = live.market_start ? new Date(live.market_start).getTime() : 0;
       const rcEnd = live.market_end ? new Date(live.market_end).getTime() : 0;
       if (rcStart && rcEnd && rcEnd > rcStart) {
