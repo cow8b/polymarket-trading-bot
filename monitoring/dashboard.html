@@ -313,8 +313,8 @@
       <div class="panel">
         <h2>策略决策树流程图 <span id="treeMode" class="tree-mode">策略待命</span></h2>
         <div class="tree-counts">
-          <div class="tree-count">在途交易<b id="inFlight">0</b></div>
-          <div class="tree-count">已处理<b id="processed">0</b></div>
+          <div class="tree-count">持仓中<b id="inFlight">0</b></div>
+          <div class="tree-count">本轮信号<b id="processed">0</b></div>
           <div class="tree-count">已成交<b id="filled">0</b></div>
           <div class="tree-count">交易窗口<b id="arbLocked">关</b></div>
         </div>
@@ -424,6 +424,10 @@
           <div class="analytics-cell"><div class="analytics-label"><span>总成交额</span><b id="analyticsVolume">$0.00</b></div><canvas id="analyticsVolumeChart"></canvas></div>
           <div class="analytics-cell"><div class="analytics-label"><span>胜率</span><b id="analyticsWinRate">0.00%</b></div><canvas id="analyticsWinChart"></canvas></div>
           <div class="analytics-cell"><div class="analytics-label"><span>近50笔策略收益率</span><b id="analyticsEdge" title="已实现盈亏 / 入场本金；当前账本未单列手续费">—</b></div><canvas id="analyticsEdgeChart"></canvas></div>
+          <div class="analytics-cell"><div class="analytics-label"><span>RSI（1分钟）</span><b id="analyticsRsi">—</b></div><canvas id="analyticsRsiChart"></canvas></div>
+          <div class="analytics-cell"><div class="analytics-label"><span>资金费率</span><b id="analyticsFunding">—</b></div><canvas id="analyticsFundingChart"></canvas></div>
+          <div class="analytics-cell"><div class="analytics-label"><span>CVD 增量</span><b id="analyticsCvd">—</b></div><canvas id="analyticsCvdChart"></canvas></div>
+          <div class="analytics-cell"><div class="analytics-label"><span>恐惧贪婪指数</span><b id="analyticsFg">—</b></div><canvas id="analyticsFgChart"></canvas></div>
         </div>
       </div>
     </footer>
@@ -614,7 +618,9 @@
         const predictionValue = Number(predictionEdge.edge_pct);
         $("edge").textContent = `${predictionValue >= 0 ? "+" : ""}${fmt.pct(predictionValue)}`;
         $("edge").className = "v " + (predictionValue > 0 ? "green" : predictionValue < 0 ? "red" : "yellow");
-        $("edge").title = `${predictionEdge.direction || "-"} · 模型胜率 ${fmt.pct(Number(predictionEdge.held_probability || 0) * 100)} · 可成交价 ${fmt.num(predictionEdge.executable_entry_price, 4)} · 未扣费`;
+        // 该值只在下单前写入一次，标注更新时间避免陈旧数据被当作"当前"
+        const edgeAt = predictionEdge.updated_at ? ` · 更新于 ${String(predictionEdge.updated_at).slice(11,19)} UTC` : "";
+        $("edge").title = `${predictionEdge.direction || "-"} · 模型胜率 ${fmt.pct(Number(predictionEdge.held_probability || 0) * 100)} · 可成交价 ${fmt.num(predictionEdge.executable_entry_price, 4)} · 未扣费${edgeAt}`;
       } else {
         $("edge").textContent = "—";
         $("edge").className = "v yellow";
@@ -740,6 +746,9 @@
       const treePnl = $("treePnlValue"), treeDisk = $("treePnlDisk");
       if (treePnl && treeDisk) {
         const v = focusValue || p.total_pnl || 0;
+        // 标签随取值来源切换：有本轮成交事件时是"本轮 PNL"，否则展示的
+        // 其实是累计值，原标签写死会误导
+        $("treePnlText").textContent = Number.isFinite(latestRealized) ? "本轮 PNL" : "累计 PNL";
         treePnl.textContent = Math.abs(v) >= 1000 ? (v < 0 ? "-" : "") + "$" + Math.round(Math.abs(v) / 1000) + "K" : fmt.usd(v);
         treeDisk.setAttribute("fill", v >= 0 ? "#168c55" : "#d93c4d");
       }
@@ -1198,7 +1207,8 @@
       const yOf = v => r.height-padB-((v-min)/span)*plotH;
       data.forEach((bar,i)=>{
         const up=bar.close>=bar.open, x=padX+i*w+w*.22, mid=x+w*.28, yOpen=yOf(bar.open), yClose=yOf(bar.close), yHigh=yOf(bar.high), yLow=yOf(bar.low);
-        ctx.strokeStyle=up?"#168c55":"#d93c4d";ctx.fillStyle=ctx.strokeStyle;ctx.lineWidth=1.4;
+        // 与对冲扫描器一致采用红涨绿跌（此前 K 线绿涨红跌，同屏两套语义）
+        ctx.strokeStyle=up?"#d93c4d":"#168c55";ctx.fillStyle=ctx.strokeStyle;ctx.lineWidth=1.4;
         ctx.beginPath();ctx.moveTo(mid,yHigh);ctx.lineTo(mid,yLow);ctx.stroke();
         ctx.fillRect(x,Math.min(yOpen,yClose),Math.max(3,w*.52),Math.max(3,Math.abs(yClose-yOpen)));
       });
@@ -1245,6 +1255,19 @@
       miniChart("analyticsVolumeChart", volumeSeries, "#1674c9", true);
       miniChart("analyticsWinChart", winSeries, "#168c55");
       miniChart("analyticsEdgeChart", edgeSeries, "#168c55");
+      // 处理器指标四格：RSI / 资金费率 / CVD 增量 / 恐惧贪婪
+      const ind = s.processor_indicators || {};
+      $("analyticsRsi").textContent = hasValue(ind.ohlcv_rsi) ? fmt.num(ind.ohlcv_rsi, 1) : "—";
+      $("analyticsFunding").textContent = Number.isFinite(Number(ind.funding_rate))
+        ? `${(Number(ind.funding_rate) * 100).toFixed(4)}%` : "—";
+      $("analyticsCvd").textContent = Number.isFinite(Number(ind.cvd_delta))
+        ? fmt.num(ind.cvd_delta, 2) : "—";
+      $("analyticsFg").textContent = hasValue(ind.fear_greed_index)
+        ? fmt.int(ind.fear_greed_index) : "—";
+      miniChart("analyticsRsiChart", series("processor_indicators.ohlcv_rsi"), "#1674c9");
+      miniChart("analyticsFundingChart", series("processor_indicators.funding_rate"), "#1674c9");
+      miniChart("analyticsCvdChart", series("processor_indicators.cvd_delta"), "#1674c9");
+      miniChart("analyticsFgChart", series("processor_indicators.fear_greed_index"), "#1674c9");
       // 「状态统计与收益圆环」面板被 CSS 隐藏（.main-bottom 第 2 块），
       // 不再每秒向 0×0 画布绘制；若要恢复该面板，需同时恢复
       // bars("bars", ...) 与 pnlDisk("donut", ...) 的调用。

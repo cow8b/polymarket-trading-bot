@@ -3381,6 +3381,7 @@ class IntegratedBTCStrategy(Strategy):
         pt.pnl_pct = pnl_pct
         pt.outcome = outcome
         pt.close_reason = close_reason
+        pt.closed_at = now
 
         try:
             self.performance_tracker.record_trade(

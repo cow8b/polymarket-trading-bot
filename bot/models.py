@@ -48,6 +48,7 @@ class PaperTrade:
     # Settlement context (mirrors LiveTrade so analytics treat paper/live alike)
     filled_qty: float = 0.0         # tokens held = size_usd / entry_price
     close_reason: str = ""          # "" while open; EXIT_TP | EXIT_STOP | TIME-EXIT | SETTLEMENT | ...
+    closed_at: Optional[datetime] = None  # 平仓时间；缺失时持仓时长统计无法计算
     ml_trade_id: Optional[int] = None
 
     # Session tracking
@@ -75,6 +76,7 @@ class PaperTrade:
             "funding_rate": round(self.funding_rate, 6),
             "filled_qty": round(self.filled_qty, 6),
             "close_reason": self.close_reason,
+            "closed_at": self.closed_at.isoformat() if self.closed_at else None,
             "ml_trade_id": self.ml_trade_id,
             "session_trade_num": self.session_trade_num,
         }
@@ -103,6 +105,11 @@ class PaperTrade:
             funding_rate=float(raw.get("funding_rate", 0.0) or 0.0),
             filled_qty=float(raw.get("filled_qty", 0.0) or 0.0),
             close_reason=str(raw.get("close_reason", "")),
+            closed_at=(
+                datetime.fromisoformat(str(raw["closed_at"]).replace("Z", "+00:00"))
+                if raw.get("closed_at")
+                else None
+            ),
             ml_trade_id=raw.get("ml_trade_id"),
             session_trade_num=int(raw.get("session_trade_num", 0) or 0),
         )
