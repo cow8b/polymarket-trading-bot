@@ -282,7 +282,10 @@
     @keyframes dash { to { stroke-dashoffset: -16; } }
     .node-text { fill: #111; font-size: 14px; font-weight: 900; text-anchor: middle; dominant-baseline: middle; letter-spacing: .5px; }
     .node-text.light { fill: #fff; }
-    .node-caption { fill: #6c665d; font-size: 10px; text-anchor: middle; }
+    /* 纸色描边光晕：连线/粒子从说明文字下方穿过时，文字保持完整可读
+       （SVG 标签避让标准技法——视觉上是线为文字让位） */
+    .node-caption { fill: #57534a; font-size: 10px; text-anchor: middle;
+      paint-order: stroke; stroke: var(--paper); stroke-width: 5px; stroke-linejoin: round; }
     .stat-bars { height: 86px; border: 1px solid rgba(22,19,15,.38); background: #f3eddd; padding: 4px; }
     .donut-wrap { height: 210px; display: flex; justify-content: center; align-items: center; }
     .focus-bar {
@@ -484,6 +487,9 @@
               <path id="e11" class="edge" d="M865 324 L865 355"/>
               <path id="e12" class="edge" d="M865 413 L865 431"/>
 
+              <!-- 粒子层置于节点与文字之下：光珠沿线流动但不遮挡任何文字 -->
+              <g id="flowParticles" pointer-events="none"></g>
+
               <circle id="nodeQuote" class="node dark" cx="92" cy="45" r="33"/>
               <text class="node-text light" x="92" y="40">实时</text><text class="node-text light" x="92" y="57">报价</text>
               <rect id="nodeMarket" class="node" x="38" y="106" width="108" height="57" rx="3"/>
@@ -517,7 +523,6 @@
               <circle id="treePnlDisk" cx="865" cy="476" r="45" fill="#168c55" stroke="#0e0d0b" stroke-width="2"/>
               <text id="treePnlText" class="node-text light" x="865" y="468">本轮 PNL</text>
               <text id="treePnlValue" class="node-text light" x="865" y="490">$0</text>
-              <g id="flowParticles" pointer-events="none"></g>
               <g id="nodeBeacons" pointer-events="none"></g>
             </svg>
           </div>
