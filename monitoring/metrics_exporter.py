@@ -121,12 +121,26 @@ PROCESSOR_NAMES = [
 
 
 def _dashboard_html() -> str:
-    """Return the built-in dashboard HTML, falling back to the embedded page."""
+    """Return the built-in dashboard HTML.
+
+    此前这里兜底返回一份内嵌的 228 行旧版 UI 副本——与 dashboard.html
+    长期不同步（字段口径都不一致），审计认定为最大单体技术债。文件缺失
+    属于部署错误，明确报错比静默展示一套过期界面更安全。
+    """
     path = Path(__file__).with_name("dashboard.html")
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
-        return DASHBOARD_HTML
+    except OSError as e:
+        logger.error(f"dashboard.html 读取失败: {e}")
+        return (
+            "<!doctype html><html lang='zh'><meta charset='utf-8'>"
+            "<body style='font-family:sans-serif;margin:3em;background:#111;color:#eee'>"
+            "<h1>驾驶舱页面缺失</h1>"
+            "<p>monitoring/dashboard.html 无法读取——请检查部署是否完整。</p>"
+            f"<p style='color:#888'>{str(e)[:200]}</p>"
+            "<p>数据接口仍可用：<a style='color:#58a6ff' href='/api/dashboard/snapshot'>"
+            "/api/dashboard/snapshot</a></p></body></html>"
+        )
 
 
 class MetricsHandler(BaseHTTPRequestHandler):
@@ -1223,235 +1237,6 @@ def _dashboard_history_points(default: int = 3600) -> int:
     return max(60, min(86400, value))
 
 
-DASHBOARD_HTML = r"""<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Polymarket AI Bot — Full Analytics</title>
-  <style>
-    :root {
-      --bg: #0b1020;
-      --panel: #111827;
-      --panel-2: #0f172a;
-      --text: #e5e7eb;
-      --muted: #94a3b8;
-      --line: #243044;
-      --good: #22c55e;
-      --bad: #ef4444;
-      --warn: #f59e0b;
-      --blue: #38bdf8;
-      --violet: #a78bfa;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: radial-gradient(circle at top left, #14213f 0, var(--bg) 34rem);
-      color: var(--text);
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    header {
-      position: sticky;
-      top: 0;
-      z-index: 10;
-      border-bottom: 1px solid var(--line);
-      background: rgba(11, 16, 32, 0.88);
-      backdrop-filter: blur(12px);
-      padding: 18px 24px;
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      align-items: center;
-    }
-    h1 { margin: 0; font-size: 20px; letter-spacing: .2px; }
-    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
-    main { padding: 22px; max-width: 1780px; margin: 0 auto; }
-    section { margin-bottom: 28px; }
-    h2 { font-size: 16px; font-weight: 700; margin: 0 0 12px; color: #f8fafc; }
-    .grid { display: grid; grid-template-columns: repeat(6, minmax(160px, 1fr)); gap: 12px; }
-    .grid.four { grid-template-columns: repeat(4, minmax(180px, 1fr)); }
-    .grid.five { grid-template-columns: repeat(5, minmax(160px, 1fr)); }
-    .grid.two { grid-template-columns: repeat(2, minmax(280px, 1fr)); }
-    .card {
-      background: linear-gradient(180deg, rgba(17,24,39,.96), rgba(15,23,42,.96));
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      padding: 14px;
-      min-height: 92px;
-      box-shadow: 0 10px 32px rgba(0,0,0,.18);
-    }
-    .label { color: var(--muted); font-size: 12px; line-height: 1.25; }
-    .value { font-size: 25px; font-weight: 750; margin-top: 8px; white-space: nowrap; }
-    .unit { color: var(--muted); font-size: 13px; margin-left: 3px; }
-    .gauge .track { height: 8px; background: #1f2937; border-radius: 999px; overflow: hidden; margin-top: 12px; }
-    .gauge .bar { height: 100%; width: 0%; background: linear-gradient(90deg, var(--blue), var(--good)); border-radius: 999px; transition: width .25s; }
-    canvas { width: 100%; height: 230px; display: block; }
-    .chart { min-height: 300px; }
-    .pill {
-      display: inline-flex; align-items: center; gap: 6px;
-      padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px;
-      color: var(--muted); font-size: 12px; background: rgba(15,23,42,.8);
-    }
-    .ok { color: var(--good); }
-    .bad { color: var(--bad); }
-    .warn { color: var(--warn); }
-    .processor { min-height: 120px; }
-    .dir { margin-top: 8px; font-size: 12px; color: var(--muted); }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    td { padding: 8px 0; border-bottom: 1px solid rgba(148,163,184,.12); }
-    td:last-child { text-align: right; color: #f8fafc; font-weight: 650; }
-    @media (max-width: 1180px) {
-      .grid, .grid.four, .grid.five { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
-      .grid.two { grid-template-columns: 1fr; }
-    }
-    @media (max-width: 640px) {
-      main { padding: 14px; }
-      .grid, .grid.four, .grid.five { grid-template-columns: 1fr; }
-      header { display: block; }
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <div>
-      <h1>Polymarket AI Bot — Full Analytics</h1>
-      <div class="sub">内置仪表盘 · 数据源与 Grafana 相同，来自 /metrics 同一套指标</div>
-    </div>
-    <div class="pill">状态：<span id="status" class="warn">连接中</span> · 更新时间：<span id="updated">—</span></div>
-  </header>
-  <main id="app"></main>
-  <script>
-    const PROCESSORS = ["OHLCVMomentum","TickVelocity","CVDOrderBook","OrderBookImbalance","Liquidations","SpikeDetection","PriceDivergence","FundingRateOI","DeribitPCR","SentimentAnalysis"];
-    const app = document.getElementById("app");
-    const fmt = {
-      usd: v => "$" + n(v, 2),
-      pct: v => n(v, 2) + "%",
-      num: (v, d=2) => n(v, d),
-      int: v => n(v, 0),
-      prob: v => n((v || 0) * 100, 1) + "%",
-      sec: v => {
-        v = Math.max(0, Number(v || 0));
-        if (v < 60) return n(v, 0) + "s";
-        if (v < 3600) return n(v / 60, 1) + "m";
-        return n(v / 3600, 2) + "h";
-      },
-    };
-    function n(v, d=2) {
-      v = Number(v || 0);
-      return v.toLocaleString(undefined, {maximumFractionDigits:d, minimumFractionDigits:d});
-    }
-    function get(obj, path, fallback=0) {
-      return path.split(".").reduce((o, k) => (o && o[k] !== undefined ? o[k] : undefined), obj) ?? fallback;
-    }
-    function card(label, value, unit="", cls="") {
-      return `<div class="card ${cls}"><div class="label">${label}</div><div class="value">${value}<span class="unit">${unit}</span></div></div>`;
-    }
-    function gauge(label, value, max=100, formatter=fmt.num) {
-      const pct = Math.max(0, Math.min(100, (Number(value || 0) / max) * 100));
-      return `<div class="card gauge"><div class="label">${label}</div><div class="value">${formatter(value)}</div><div class="track"><div class="bar" style="width:${pct}%"></div></div></div>`;
-    }
-    function section(title, html) {
-      return `<section><h2>${title}</h2>${html}</section>`;
-    }
-    function directionText(v) {
-      v = Number(v || 0);
-      if (v > 0) return `<span class="ok">Bullish / UP</span>`;
-      if (v < 0) return `<span class="bad">Bearish / DOWN</span>`;
-      return `<span class="warn">Neutral</span>`;
-    }
-    function render(s) {
-      const p = s.portfolio, r = s.risk, t = s.trade_stats, f = s.fusion_ml, e = s.execution, o = s.latest_order, ind = s.processor_indicators;
-      const procCards = PROCESSORS.map(name => {
-        const x = s.processors[name] || {};
-        return `<div class="card processor gauge"><div class="label">${name}</div><div class="value">${fmt.num(x.score)}</div><div class="track"><div class="bar" style="width:${Math.max(0, Math.min(100, x.score || 0))}%"></div></div><div class="dir">方向：${directionText(x.direction)} · 置信度 ${fmt.prob(x.confidence)} · 触发 ${fmt.int(x.fires_total)}</div></div>`;
-      }).join("");
-      app.innerHTML =
-        section("⚡ Portfolio Overview", `<div class="grid">${card("Capital", fmt.usd(p.current_capital))}${card("Total P&L", fmt.usd(p.total_pnl), "", p.total_pnl >= 0 ? "ok" : "bad")}${card("ROI %", fmt.pct(p.roi))}${card("Daily ROI %", fmt.pct(p.daily_roi))}${card("7-day ROI %", fmt.pct(p.weekly_roi))}${card("30-day ROI %", fmt.pct(p.monthly_roi))}</div>`) +
-        section("📐 Risk-Adjusted Metrics", `<div class="grid four">${gauge("Sharpe Ratio", r.sharpe_ratio, 5)}${gauge("Sortino Ratio", r.sortino_ratio, 5)}${gauge("Calmar Ratio", r.calmar_ratio, 5)}${gauge("Kelly Fraction", r.kelly_fraction, 1, fmt.prob)}</div>`) +
-        section("📉 Drawdown & Capital", `<div class="grid four">${gauge("Max Drawdown %", r.max_drawdown, 100, fmt.pct)}${card("Max Drawdown USD", fmt.usd(r.max_drawdown_usd))}${card("Peak Capital", fmt.usd(r.peak_capital))}${card("Recovery Factor", fmt.num(r.recovery_factor))}</div>`) +
-        section("🎲 Trade Statistics", `<div class="grid five">${gauge("Win Rate %", t.win_rate, 100, fmt.pct)}${card("Profit Factor", fmt.num(t.profit_factor))}${card("Expectancy / Trade", fmt.usd(t.expectancy_usd))}${card("Avg Win / Avg Loss", fmt.num(t.avg_win_loss_ratio))}${card("Streaks", `${fmt.int(t.consecutive_wins)}W / ${fmt.int(t.consecutive_losses)}L`)}</div>`) +
-        section("🤖 Signal Processors — Live Scores", `<div class="grid five">${procCards}</div>`) +
-        section("📊 Signal Processor — Direction & Confidence", `<div class="grid two">${chartCard("processorScores", "All Processor Scores")}${chartCard("processorDirections", "Processor Direction")}</div>`) +
-        section("🔬 Processor-Specific Indicators", `<div class="grid five">${card("OHLCV RSI", fmt.num(ind.ohlcv_rsi))}${card("MACD Histogram", fmt.num(ind.ohlcv_macd_histogram, 4))}${card("CVD Delta", fmt.num(ind.cvd_delta, 0))}${card("Tick Velocity 30s / 60s", `${fmt.num(ind.tick_velocity_30s, 4)} / ${fmt.num(ind.tick_velocity_60s, 4)}`)}${card("Bid/Ask Ratio", fmt.num(ind.orderbook_bid_ask_ratio))}${card("Liquidation Volume", fmt.usd(ind.liquidation_cascade_volume))}${card("Spike Magnitude", fmt.num(ind.spike_magnitude, 4))}${card("Funding / OI", `${fmt.num(ind.funding_rate, 5)} / ${fmt.pct(ind.oi_change_pct)}`)}${card("Deribit PCR", fmt.num(ind.pcr_value))}${card("Fear/Greed", fmt.num(ind.fear_greed_index))}</div>`) +
-        section("🧠 ML Engine & Fusion", `<div class="grid four">${gauge("Fusion Score", f.fusion_score, 100)}${gauge("Fusion Confidence", f.fusion_confidence, 1, fmt.prob)}${gauge("ML Edge Score", f.ml_edge_score, 1, fmt.prob)}${gauge("ML p(UP)", f.ml_prediction, 1, fmt.prob)}</div><div class="grid two" style="margin-top:12px">${chartCard("fusion", "Fusion Score & ML Edge vs time")}${chartCard("signals", "Signals per fusion pass")}</div>`) +
-        section("📦 Execution & Order Flow", `<div class="grid">${card("Trades", fmt.int(e.trades_closed_total))}${card("Wins", fmt.int(e.winning_trades_total))}${card("Losses", fmt.int(e.losing_trades_total))}${card("Open Positions", fmt.int(e.open_positions))}${card("Exposure USD", fmt.usd(e.total_exposure))}${gauge("Risk Utilisation %", r.risk_utilization, 100, fmt.pct)}</div>`) +
-        section("🎯 Latest Order", `<div class="grid five">${card("Direction", directionText(o.direction))}${card("Order size", fmt.usd(o.size_usd))}${card("Entry price", fmt.num(o.entry_price, 4))}${card("Poly YES price", fmt.num(o.poly_yes_price, 4))}${card("股数", fmt.num(o.qty_tokens, 4))}${card("Time to settle", fmt.sec(o.seconds_to_settle))}${card("BTC spot @ entry", fmt.usd(o.btc_spot_usd))}${card("ML edge @ entry", fmt.prob(o.ml_edge))}${card("Signal score / conf", `${fmt.num(o.signal_score)} / ${fmt.prob(o.signal_confidence)}`)}${card("Bid / Ask / Spread", `${fmt.num(o.bid_price, 4)} / ${fmt.num(o.ask_price, 4)} / ${fmt.pct(o.spread_pct)}`)}${card("Mode", o.is_simulation ? "SIM" : "LIVE")}</div><div class="grid two" style="margin-top:12px">${chartCard("orders", "Order entry price & size over time")}${tableCard("Order Flow", [["Placed", e.orders_placed_total],["Filled", e.orders_filled_total],["Rejected", e.orders_rejected_total],["UP orders", get(e, "orders_by_direction.up")],["DOWN orders", get(e, "orders_by_direction.down")]])}</div>`) +
-        section("📈 Time Series — Capital, P&L, Drawdown", `<div class="grid two">${chartCard("capital", "Capital & P&L trajectory")}${chartCard("risk", "Sharpe / Sortino / Calmar vs time")}${chartCard("roi", "ROI breakdown")}${chartCard("winDrawdown", "Win rate & max drawdown")}</div>`);
-    }
-    function chartCard(id, title) {
-      return `<div class="card chart"><div class="label">${title}</div><canvas id="${id}"></canvas></div>`;
-    }
-    function tableCard(title, rows) {
-      return `<div class="card"><div class="label">${title}</div><table>${rows.map(r => `<tr><td>${r[0]}</td><td>${fmt.num(r[1], 0)}</td></tr>`).join("")}</table></div>`;
-    }
-    function drawLine(canvas, series, colors) {
-      if (!canvas) return;
-      const rect = canvas.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
-      const ctx = canvas.getContext("2d");
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0,0,rect.width,rect.height);
-      ctx.strokeStyle = "#243044";
-      ctx.lineWidth = 1;
-      for (let i=0;i<4;i++) {
-        const y = 20 + i * ((rect.height-36)/3);
-        ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(rect.width,y); ctx.stroke();
-      }
-      const values = series.flatMap(s => s.values).filter(v => Number.isFinite(v));
-      const min = Math.min(...values, 0), max = Math.max(...values, 1);
-      const span = Math.max(1e-9, max - min);
-      series.forEach((s, idx) => {
-        ctx.strokeStyle = colors[idx % colors.length];
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        s.values.forEach((v, i) => {
-          const x = series[0].values.length <= 1 ? 0 : i * rect.width / (series[0].values.length - 1);
-          const y = rect.height - 16 - ((v - min) / span) * (rect.height - 34);
-          if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        });
-        ctx.stroke();
-        ctx.fillStyle = colors[idx % colors.length];
-        ctx.fillText(s.name, 10, 16 + idx * 14);
-      });
-    }
-    function drawCharts(history) {
-      const pts = history.points || [];
-      const arr = fn => pts.map(fn).map(v => Number(v || 0));
-      const colors = ["#38bdf8","#22c55e","#f59e0b","#a78bfa","#ef4444","#14b8a6"];
-      drawLine(document.getElementById("capital"), [{name:"Capital",values:arr(p=>p.portfolio.current_capital)},{name:"PnL",values:arr(p=>p.portfolio.total_pnl)}], colors);
-      drawLine(document.getElementById("risk"), [{name:"Sharpe",values:arr(p=>p.risk.sharpe_ratio)},{name:"Sortino",values:arr(p=>p.risk.sortino_ratio)},{name:"Calmar",values:arr(p=>p.risk.calmar_ratio)}], colors);
-      drawLine(document.getElementById("roi"), [{name:"Daily",values:arr(p=>p.portfolio.daily_roi)},{name:"Weekly",values:arr(p=>p.portfolio.weekly_roi)},{name:"Monthly",values:arr(p=>p.portfolio.monthly_roi)}], colors);
-      drawLine(document.getElementById("winDrawdown"), [{name:"Win%",values:arr(p=>p.trade_stats.win_rate)},{name:"MaxDD",values:arr(p=>p.risk.max_drawdown)}], colors);
-      drawLine(document.getElementById("fusion"), [{name:"Fusion",values:arr(p=>p.fusion_ml.fusion_score)},{name:"ML Edge",values:arr(p=>p.fusion_ml.ml_edge_score)},{name:"ML pUP",values:arr(p=>p.fusion_ml.ml_prediction)}], colors);
-      drawLine(document.getElementById("signals"), [{name:"Signals",values:arr(p=>p.fusion_ml.fusion_num_signals)}], colors);
-      drawLine(document.getElementById("orders"), [{name:"Entry",values:arr(p=>p.latest_order?.entry_price || 0)},{name:"Size",values:arr(p=>p.latest_order?.size_usd || 0)}], colors);
-      drawLine(document.getElementById("processorScores"), PROCESSORS.slice(0,6).map(name => ({name, values: arr(p => (p.processor_scores || {})[name])})), colors);
-      drawLine(document.getElementById("processorDirections"), PROCESSORS.slice(0,6).map(name => ({name, values: arr(p => (p.processor_directions || {})[name])})), colors);
-    }
-    async function refresh() {
-      try {
-        const [snap, hist] = await Promise.all([
-          fetch("/api/dashboard/snapshot", {cache:"no-store"}).then(r => r.json()),
-          fetch("/api/dashboard/history?limit=900", {cache:"no-store"}).then(r => r.json())
-        ]);
-        render(snap);
-        drawCharts(hist);
-        document.getElementById("status").textContent = "在线";
-        document.getElementById("status").className = "ok";
-        document.getElementById("updated").textContent = new Date(snap.timestamp).toLocaleTimeString();
-      } catch (e) {
-        document.getElementById("status").textContent = "离线";
-        document.getElementById("status").className = "bad";
-      }
-    }
-    refresh();
-    setInterval(refresh, 2000);
-    addEventListener("resize", () => refresh());
-  </script>
-</body>
-</html>"""
 
 
 _grafana_exporter_instance: Optional[GrafanaMetricsExporter] = None
