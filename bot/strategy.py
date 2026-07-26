@@ -251,6 +251,18 @@ class IntegratedBTCStrategy(Strategy):
         except (TypeError, ValueError):
             self._exit_confirm_ticks = 2
 
+        # 未成交委托超时回收：提交后超过 N 秒仍无终态（成交/拒单/撤销）的
+        # 委托，主动撤单并从 pending 表移除，释放 Nautilus 本地占用的余额。
+        # 根因：submit 阶段网络异常（如 WS 重连中）时订单可能没有任何终态
+        # 事件，本地 hold 会永久冻结该笔资金（2026-07-26 实例：$2.5 冻结 +
+        # pending=1 直到重启）。IOC/FAK 订单正常应在秒级出终态，90s 已极宽。
+        try:
+            self._pending_order_timeout_sec = max(
+                15, int(float(os.getenv("PENDING_ORDER_TIMEOUT_SEC", "90")))
+            )
+        except (TypeError, ValueError):
+            self._pending_order_timeout_sec = 90
+
         # ── Trade-window / cooldown ──────────────────────────────────────
         # Entry window: seconds 780-870 of each 15-min market (13:00 – 14:30).
         # The 90-second window lets the strategy enter once the market trend is
@@ -2239,6 +2251,7 @@ class IntegratedBTCStrategy(Strategy):
             # Push the real Polymarket USDC balance into the risk engine so
             # drawdown / daily-loss limits track actual capital, not defaults.
             self._sync_risk_engine_balance()
+            self._reap_stale_pending_orders()
 
             # Heartbeat: report bot status every _heartbeat_secs so the user
             # can see it's alive and how long until the next trade window.
@@ -2340,6 +2353,66 @@ class IntegratedBTCStrategy(Strategy):
             self._risk_balance_last_synced = balance
         except Exception as e:
             logger.debug(f"Risk balance sync skipped: {e}")
+
+    # ── Stale pending-order reaper ────────────────────────────────────────────
+
+    def _reap_stale_pending_orders(self) -> None:
+        """回收提交后长期无终态的委托（成交/拒单/撤销事件均未到达）。
+
+        IOC/FAK 委托正常应在秒级出终态；超过 ``PENDING_ORDER_TIMEOUT_SEC``
+        仍挂在 ``_pending_orders`` 里的，几乎必然是 submit 阶段网络异常
+        （如 WS 重连中 "Request exception"）导致的孤儿单。不清理的话，
+        Nautilus 本地会永久 hold 该笔资金且 pending 计数不归零。
+
+        处理：尝试撤单（幂等，未上链的单撤单只影响本地状态）→ 从 pending
+        表移除 → 落一条 TIMEOUT 终态记录供审计。
+        """
+        if not self._pending_orders:
+            return
+        now = datetime.now(timezone.utc)
+        stale_ids: list[str] = []
+        for cid, meta in self._pending_orders.items():
+            submitted_at = meta.get("submitted_at")
+            if submitted_at is None:
+                # 旧路径注册的条目缺时间戳：现在补上，下一轮再评估。
+                meta["submitted_at"] = now
+                continue
+            try:
+                age = (now - submitted_at).total_seconds()
+            except Exception:
+                meta["submitted_at"] = now
+                continue
+            if age >= self._pending_order_timeout_sec:
+                stale_ids.append(cid)
+
+        for cid in stale_ids:
+            meta = self._pending_orders.pop(cid, None) or {}
+            reason = (
+                f"超时无终态（>{self._pending_order_timeout_sec}s），"
+                f"已主动撤单并释放本地资金占用"
+            )
+            try:
+                order = self.cache.order(ClientOrderId(cid))
+                if order is not None and not order.is_closed:
+                    self.cancel_order(order)
+            except Exception as e:
+                logger.warning(f"Stale order {cid} cancel attempt failed: {e}")
+            logger.warning(
+                f"PENDING ORDER TIMEOUT: {cid} "
+                f"({meta.get('market_slug', '?')} {meta.get('direction', '?')}) — {reason}"
+            )
+            try:
+                self._record_order_terminal(
+                    mode="live" if not self.current_simulation_mode else "sim",
+                    order_id=cid,
+                    role="entry",
+                    status="TIMEOUT",
+                    reason=reason,
+                )
+            except Exception:
+                pass
+        if stale_ids:
+            self._publish_dashboard_state()
 
     # ── Quote tick handler ────────────────────────────────────────────────────
 
@@ -3813,6 +3886,27 @@ class IntegratedBTCStrategy(Strategy):
                 logger.error(f"Instrument not in cache: {trade_instrument_id}")
                 return
 
+            # 提交前用最新盘口复核预估成交价仍在入场价带内。决策价是
+            # 决策时刻的快照，快市下到提交时可能已漂出价带（2026-07-26
+            # 实例：实盘以 $0.20 成交，低于 0.25 下限）。IOC 市价单无法
+            # 限价，只能在提交前拦截。
+            last_tick = getattr(self, "_last_bid_ask", None)
+            if last_tick:
+                try:
+                    bid_now, ask_now = float(last_tick[0]), float(last_tick[1])
+                    # YES 腿吃 ask；NO 腿价格 = 1 − YES bid。
+                    est_fill = ask_now if direction == "long" else round(1.0 - bid_now, 4)
+                    if not (self._min_entry_price <= est_fill <= self._max_entry_price):
+                        logger.warning(
+                            f"[LIVE] ENTRY SKIPPED — est. fill ${est_fill:.4f} outside "
+                            f"band [{self._min_entry_price:.2f}, {self._max_entry_price:.2f}] "
+                            f"(decision px ${float(current_price):.4f}, "
+                            f"book {bid_now:.4f}/{ask_now:.4f})"
+                        )
+                        return
+                except (TypeError, ValueError, IndexError):
+                    pass
+
             # Resolve the USD amount once and use it as the order quantity
             # below. Polymarket / Nautilus V2 expect BUY market orders to be
             # quote-denominated: ``amount`` is USD to spend, not tokens.
@@ -4104,6 +4198,17 @@ class IntegratedBTCStrategy(Strategy):
             fill_price = Decimal("0")
             fill_qty = Decimal("0")
 
+        # V2 交易所对每笔成交收取真实手续费（OrderFilled.commission，pUSD 计价）。
+        # 记下来供平仓结算时从毛利中扣除，否则账本会比钱包多出手续费部分
+        #（2026-07-26 首单实例：毛利 1.25 vs 钱包净增 1.13）。
+        try:
+            commission = getattr(event, "commission", None)
+            fill_comm = float(commission.as_decimal()) if commission is not None else 0.0
+            if fill_comm < 0:
+                fill_comm = 0.0
+        except Exception:
+            fill_comm = 0.0
+
         # Slippage / wait-time context relative to the entry submit, when we
         # have it (entry orders only — exits don't track ref price).
         is_exit = client_id in self._pending_exits
@@ -4152,6 +4257,7 @@ class IntegratedBTCStrategy(Strategy):
                 ("Fill shares", f"{float(fill_qty):.6f} 股"),
                 ("Notional",  f"${notional:.4f}"),
                 ("Slippage",  slip_str),
+                ("Commission", f"${fill_comm:.4f}"),
                 ("Latency",   f"{latency_str}  (submit → fill)"),
             ],
         )
@@ -4178,11 +4284,21 @@ class IntegratedBTCStrategy(Strategy):
         # opened a new one (BUY).
         entry_id = self._pending_exits.pop(client_id, None)
         if entry_id is not None:
+            # 平仓腿手续费累加到持仓上，随后 finalize 一并扣除。
+            pos = self._open_positions.get(entry_id)
+            if pos is not None and fill_comm > 0:
+                pos["commission_usd"] = (
+                    float(pos.get("commission_usd", 0.0) or 0.0) + fill_comm
+                )
             self._handle_exit_fill(entry_id, client_id, fill_price)
             return
 
         pending = self._pending_orders.pop(client_id, None)
         if pending is not None:
+            if fill_comm > 0:
+                pending["commission_usd"] = (
+                    float(pending.get("commission_usd", 0.0) or 0.0) + fill_comm
+                )
             self._handle_entry_fill(client_id, pending, fill_price, fill_qty)
 
     def _handle_entry_fill(
@@ -4247,6 +4363,8 @@ class IntegratedBTCStrategy(Strategy):
             "take_profit": take_profit,
             "market_end_ts": int(pending.get("market_end_ts", 0)),
             "market_slug": pending.get("market_slug", ""),
+            # 累计手续费（入场腿已计，平仓腿成交时继续累加）
+            "commission_usd": float(pending.get("commission_usd", 0.0) or 0.0),
             "ml_trade_id": pending.get("ml_trade_id"),
             "signal_score": float(pending.get("signal_score", 0.0) or 0.0),
             "signal_confidence": float(pending.get("signal_confidence", 0.0) or 0.0),
@@ -4379,7 +4497,10 @@ class IntegratedBTCStrategy(Strategy):
         exit_price_f = float(exit_price)
         qty_f = float(qty_dec)
 
-        realized = qty_f * (exit_price_f - entry_price_f)
+        # 净收益 = 毛差价 − 双腿累计手续费，与钱包实际增减一致
+        #（V2 交易所每腿收 ~2% 手续费；毛利口径会虚高）。
+        commission_usd = float(position.get("commission_usd", 0.0) or 0.0)
+        realized = qty_f * (exit_price_f - entry_price_f) - commission_usd
         pnl_pct = (exit_price_f - entry_price_f) / entry_price_f if entry_price_f > 0 else 0.0
 
         if realized > 1e-6:
@@ -4437,6 +4558,7 @@ class IntegratedBTCStrategy(Strategy):
                     "market_slug": position.get("market_slug", ""),
                     "label": position.get("label", ""),
                     "filled_qty": qty_f,
+                    "commission_usd": commission_usd,
                     "ml_trade_id": position.get("ml_trade_id"),
                 },
             )
