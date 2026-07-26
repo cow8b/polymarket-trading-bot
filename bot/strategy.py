@@ -2288,6 +2288,12 @@ class IntegratedBTCStrategy(Strategy):
         (constant wallet) the risk engine keeps tracking simulated P&L instead
         of being reset every minute. Throttled to one portfolio read per 60s.
         """
+        # 模拟盘不同步：venue 纸面账户的余额是 Nautilus 的虚构默认值
+        #（实测 $100），与配置的模拟本金无关。用它重定基会把驾驶舱
+        # "账户权益"的基数从 ACCOUNT_BALANCE_USD 污染成 $100
+        #（2026-07-26 实例：权益显示 $121 而实际应为 ~$1021）。
+        if self.current_simulation_mode:
+            return
         now_mono = time.monotonic()
         if now_mono < self._risk_balance_next_check:
             return
