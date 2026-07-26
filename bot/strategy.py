@@ -729,8 +729,10 @@ class IntegratedBTCStrategy(Strategy):
         rows.sort(key=lambda item: item["price"], reverse=reverse)
         return rows[:5]
 
-    def _fetch_dashboard_market_data(self, client: httpx.Client, *, include_candles: bool) -> None:
-        """抓取驾驶舱使用的公开行情；失败时保留最后一次成功快照。"""
+    def _fetch_dashboard_market_data(self, client: httpx.Client, *, include_candles: bool) -> bool:
+        """抓取驾驶舱使用的公开行情；失败时保留最后一次成功快照。
+
+        返回本轮是否有抓取错误（供调用方统计连败并重建连接池）。"""
         now_iso = datetime.now(timezone.utc).isoformat()
         updates: Dict[str, Any] = {"updated_at": now_iso, "last_error": ""}
         errors: List[str] = []
@@ -759,7 +761,7 @@ class IntegratedBTCStrategy(Strategy):
                     "candles_updated_at": now_iso,
                 })
             except Exception as exc:
-                errors.append(f"BTC K线: {exc}")
+                errors.append(f"BTC K线: {exc!r}")
             try:
                 eth_response = client.get(
                     "https://api.binance.com/api/v3/ticker/price",
@@ -768,7 +770,7 @@ class IntegratedBTCStrategy(Strategy):
                 eth_response.raise_for_status()
                 updates["eth_price"] = float(eth_response.json()["price"])
             except Exception as exc:
-                errors.append(f"ETH行情: {exc}")
+                errors.append(f"ETH行情: {exc!r}")
 
         yes_token = str(getattr(self, "_yes_token_id", None) or "")
         no_token = str(getattr(self, "_no_token_id", None) or "")
@@ -795,7 +797,7 @@ class IntegratedBTCStrategy(Strategy):
                     "asks": self._dashboard_book_levels(raw_book.get("asks", []), reverse=False),
                 }
             except Exception as exc:
-                errors.append(f"{outcome.upper()}盘口: {exc}")
+                errors.append(f"{outcome.upper()}盘口: {exc!r}")
         if books:
             updates.update({
                 "orderbook": {
@@ -809,28 +811,54 @@ class IntegratedBTCStrategy(Strategy):
 
         with self._dashboard_lock:
             self._dashboard_market_data.update(updates)
+        return bool(errors)
 
     def _dashboard_data_loop(self) -> None:
-        """后台轮询真实 K 线和 Polymarket 盘口。"""
+        """后台轮询真实 K 线和 Polymarket 盘口。
+
+        连续失败时重建 httpx.Client：断网会把长连接池整体毁掉（TLS 会话
+        失效），网络恢复后复用旧池只会继续失败——2026-07-26 断网 6.5h 后
+        盘口冻结 15h（页面价与持仓 last_bid 矛盾）的根因。"""
         proxy_url = (os.getenv("POLYMARKET_PROXY_URL") or "").strip() or None
         client_kwargs: Dict[str, Any] = {"timeout": 6.0}
         if proxy_url:
             client_kwargs["proxy"] = proxy_url
         next_candles_at = 0.0
-        with httpx.Client(**client_kwargs) as client:
+        fail_streak = 0
+        client = httpx.Client(**client_kwargs)
+        try:
             while not self._dashboard_stop_event.is_set():
                 now = time.monotonic()
                 try:
                     include_candles = now >= next_candles_at
-                    self._fetch_dashboard_market_data(client, include_candles=include_candles)
+                    had_error = self._fetch_dashboard_market_data(
+                        client, include_candles=include_candles
+                    )
                     if include_candles:
                         next_candles_at = now + 15.0
                     self._publish_dashboard_state()
+                    fail_streak = fail_streak + 1 if had_error else 0
                 except Exception as exc:
+                    fail_streak += 1
                     with self._dashboard_lock:
-                        self._dashboard_market_data["last_error"] = str(exc)
-                    logger.debug(f"驾驶舱行情刷新失败: {exc}")
+                        self._dashboard_market_data["last_error"] = repr(exc)
+                    logger.debug(f"驾驶舱行情刷新失败: {exc!r}")
+                if fail_streak >= 5:
+                    logger.warning(
+                        f"驾驶舱行情连续失败 {fail_streak} 轮，重建 HTTP 连接池"
+                    )
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                    client = httpx.Client(**client_kwargs)
+                    fail_streak = 0
                 self._dashboard_stop_event.wait(2.0)
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def _publish_dashboard_state(self) -> None:
         if self.grafana_exporter and hasattr(self.grafana_exporter, "update_live_state"):
@@ -1615,6 +1643,20 @@ class IntegratedBTCStrategy(Strategy):
             yes_ask = float(ask)
 
         orderbook = market_data.get("orderbook", {})
+        # 陈旧护栏：REST 盘口超过 30s 未更新（抓取线程故障/断网）时整体
+        # 弃用，回退 tick 派生价——冻结的盘口价会与持仓 last_bid 互相矛盾，
+        # 让持仓收益看起来"算错了"（2026-07-26 实例：盘口冻结 15 小时）。
+        ob_ts = market_data.get("orderbook_updated_at")
+        orderbook_stale = True
+        if ob_ts:
+            try:
+                orderbook_stale = (
+                    datetime.now(timezone.utc) - datetime.fromisoformat(str(ob_ts))
+                ).total_seconds() > 30.0
+            except Exception:
+                orderbook_stale = True
+        if orderbook_stale:
+            orderbook = {}
         up_book = orderbook.get("up", {}) if isinstance(orderbook, dict) else {}
         down_book = orderbook.get("down", {}) if isinstance(orderbook, dict) else {}
         up_asks = up_book.get("asks", []) if isinstance(up_book, dict) else []
@@ -1623,6 +1665,11 @@ class IntegratedBTCStrategy(Strategy):
             up_price = float(up_asks[0].get("price", 0.0) or 0.0) or None
         if down_asks:
             down_price = float(down_asks[0].get("price", 0.0) or 0.0) or None
+        # REST 盘口不可用时用实时 tick 派生，保证价格与持仓估值同源。
+        if up_price is None and yes_ask is not None:
+            up_price = yes_ask
+        if down_price is None and yes_bid is not None:
+            down_price = round(1.0 - yes_bid, 4)
 
         open_count = len(self._open_positions)
         pending_count = len(self._pending_orders)
@@ -1756,6 +1803,7 @@ class IntegratedBTCStrategy(Strategy):
             "candles": market_data.get("candles", []),
             "candles_updated_at": market_data.get("candles_updated_at"),
             "orderbook": orderbook,
+            "orderbook_stale": orderbook_stale,
             "orderbook_updated_at": market_data.get("orderbook_updated_at"),
             "market_data_error": market_data.get("last_error", ""),
             "decision": decision_state,
@@ -3278,6 +3326,17 @@ class IntegratedBTCStrategy(Strategy):
             bid_dec = ask_dec = current_price
 
         fill_price = self._simulated_entry_price(direction, bid_dec, ask_dec, current_price)
+
+        # 成交价复检入场带：决策通过与实际成交之间市场可能已大幅移动
+        #（2026-07-26 实例：SHORT 决策时 mid 0.40 在带内，30 秒暴跌后
+        # 成交在 $0.81，穿透 [0.25, 0.75] 带）。带外直接放弃本次开仓。
+        fill_f = float(fill_price)
+        if not (self._min_entry_price <= fill_f <= self._max_entry_price):
+            logger.warning(
+                f"放弃纸面开仓：成交价 ${fill_f:.4f} 超出入场带 "
+                f"[{self._min_entry_price:.2f}, {self._max_entry_price:.2f}]（快市穿透）"
+            )
+            return
         size_usd = float(position_size)
         try:
             max_usd = max(0.01, float(os.getenv("MARKET_BUY_USD", str(size_usd))))
