@@ -156,14 +156,18 @@ def _boot_bot_node(
             "POLYMARKET_SIG_TYPE=0 (EOA) but POLYMARKET_FUNDER is set — "
             "funder will be ignored. Use sig_type=1 or 2 to trade from the proxy."
         )
-    if sig_type in (1, 2) and not funder:
+    if sig_type in (1, 2, 3) and not funder:
         logger.error(
             "POLYMARKET_SIG_TYPE=%d (proxy) requires POLYMARKET_FUNDER to be set "
             "to your Polymarket proxy address (visible at polymarket.com → Deposit).",
             sig_type,
         )
 
-    sig_label = {0: "EOA", 1: "POLY_PROXY", 2: "POLY_GNOSIS_SAFE"}.get(sig_type, "UNKNOWN")
+    # 3 = POLY_1271 存款钱包（2026-04-28 V2 升级引入的 ERC-1967 代理，
+    # EIP-1271 验签，工厂部署时预设 pUSD 无限授权）。
+    sig_label = {0: "EOA", 1: "POLY_PROXY", 2: "POLY_GNOSIS_SAFE", 3: "POLY_1271"}.get(
+        sig_type, "UNKNOWN"
+    )
     logger.info(f"Polymarket wallet config: signature_type={sig_type} ({sig_label})")
     proxy_url = _polymarket_proxy_url()
     if proxy_url:
@@ -330,14 +334,18 @@ def run_integrated_bot(
             "POLYMARKET_SIG_TYPE=0 (EOA) but POLYMARKET_FUNDER is set — "
             "funder will be ignored. Use sig_type=1 or 2 to trade from the proxy."
         )
-    if sig_type in (1, 2) and not funder:
+    if sig_type in (1, 2, 3) and not funder:
         logger.error(
             "POLYMARKET_SIG_TYPE=%d (proxy) requires POLYMARKET_FUNDER to be set "
             "to your Polymarket proxy address (visible at polymarket.com → Deposit).",
             sig_type,
         )
 
-    sig_label = {0: "EOA", 1: "POLY_PROXY", 2: "POLY_GNOSIS_SAFE"}.get(sig_type, "UNKNOWN")
+    # 3 = POLY_1271 存款钱包（2026-04-28 V2 升级引入的 ERC-1967 代理，
+    # EIP-1271 验签，工厂部署时预设 pUSD 无限授权）。
+    sig_label = {0: "EOA", 1: "POLY_PROXY", 2: "POLY_GNOSIS_SAFE", 3: "POLY_1271"}.get(
+        sig_type, "UNKNOWN"
+    )
     logger.info(f"Polymarket wallet config: signature_type={sig_type} ({sig_label})")
     logger.info(f"  Funder (USDC holder): {funder or '(none — direct EOA)'}")
     proxy_url = _polymarket_proxy_url()

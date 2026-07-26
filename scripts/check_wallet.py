@@ -47,12 +47,15 @@ def main() -> int:
         sig_type = -1
     report(bool(pk), "POLYMARKET_PK 已配置")
     report(bool(funder), "POLYMARKET_FUNDER 已配置", funder or "缺失")
-    sig_label = {0: "EOA(0)", 1: "POLY_PROXY/Magic(1)", 2: "POLY_GNOSIS_SAFE(2)"}.get(
-        sig_type, f"非法值 {sig_type}"
-    )
-    report(sig_type in (0, 1, 2), "POLYMARKET_SIG_TYPE", sig_label)
-    if sig_type in (1, 2) and not funder:
-        report(False, "sig_type=1/2 需要 FUNDER（代理钱包地址）")
+    sig_label = {
+        0: "EOA(0)",
+        1: "POLY_PROXY/Magic(1)",
+        2: "POLY_GNOSIS_SAFE(2)",
+        3: "POLY_1271 存款钱包(3)",
+    }.get(sig_type, f"非法值 {sig_type}")
+    report(sig_type in (0, 1, 2, 3), "POLYMARKET_SIG_TYPE", sig_label)
+    if sig_type in (1, 2, 3) and not funder:
+        report(False, "sig_type=1/2/3 需要 FUNDER（代理钱包地址）")
     if failures:
         _summary()
         return 1
@@ -69,13 +72,26 @@ def main() -> int:
         return 1
 
     # 3. CLOB API 认证
+    # 2026-04-28 交易所升级后必须用 V2 客户端；V1 会对 V2 系统读出全 0。
     try:
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
-    except ImportError as e:
-        report(False, "py_clob_client 未安装", repr(e))
-        _summary()
-        return 1
+        from py_clob_client_v2.client import ClobClient
+        from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+
+        print(f"  {OK} 使用 py_clob_client_v2（V2 交易所）")
+    except ImportError:
+        try:
+            from py_clob_client.client import ClobClient
+            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+
+            report(
+                False,
+                "仅有 V1 客户端 py_clob_client",
+                "V2 交易所（2026-04-28 起）下 V1 读数恒为 0——pip install py-clob-client-v2",
+            )
+        except ImportError as e:
+            report(False, "CLOB 客户端未安装", repr(e))
+            _summary()
+            return 1
 
     try:
         client = ClobClient(
@@ -85,7 +101,10 @@ def main() -> int:
             signature_type=sig_type,
             funder=funder or None,
         )
-        client.set_api_creds(client.create_or_derive_api_creds())
+        derive = getattr(client, "create_or_derive_api_creds", None) or getattr(
+            client, "create_or_derive_api_key"
+        )
+        client.set_api_creds(derive())
         report(True, "CLOB API 认证（L2 凭据派生）")
     except Exception as e:
         report(False, "CLOB API 认证失败", repr(e))
