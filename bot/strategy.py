@@ -1614,19 +1614,24 @@ class IntegratedBTCStrategy(Strategy):
             else:
                 next_window = "switching soon"
 
-            # Reference BTC at market open (first recorded spot in this window).
-            for trade in reversed(self.paper_trades + self.live_trades):
-                if trade.market_slug == market_slug and trade.btc_spot_price:
-                    price_to_beat = float(trade.btc_spot_price)
-                    break
-            if price_to_beat is None:
-                candles = market_data.get("candles", [])
-                if candles:
-                    nearest = min(
-                        candles,
-                        key=lambda bar: abs(float(bar.get("time", 0)) - market_start_ts),
-                    )
+            # 开盘基准 = 市场起始那一分钟的 1m K 线开盘价。不能用本市场
+            # 首笔交易的入场现货——交易在第 5 分钟后才入场，拿它当"开盘
+            # 价"会让方向显示与盘口矛盾（2026-07-26 实例：显示 +58 涨、
+            # 盘口 DOWN 0.77 且买 DOWN 获胜——真基准在更高位）。仅当
+            # K 线不可用（行情断流）时才退回交易入场价兜底。
+            candles = market_data.get("candles", [])
+            if candles:
+                nearest = min(
+                    candles,
+                    key=lambda bar: abs(float(bar.get("time", 0)) - market_start_ts),
+                )
+                if abs(float(nearest.get("time", 0)) - market_start_ts) <= 90:
                     price_to_beat = float(nearest.get("open", 0.0) or 0.0) or None
+            if price_to_beat is None:
+                for trade in reversed(self.paper_trades + self.live_trades):
+                    if trade.market_slug == market_slug and trade.btc_spot_price:
+                        price_to_beat = float(trade.btc_spot_price)
+                        break
 
         candles = market_data.get("candles", [])
         btc_price = (
