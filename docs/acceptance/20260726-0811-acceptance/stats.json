@@ -1,0 +1,65 @@
+{
+  "paper": {
+    "total": 30,
+    "settled_count": 30,
+    "wins": 14,
+    "losses": 16,
+    "win_rate": 46.666666666666664,
+    "total_pnl": 19.94786,
+    "avg_pnl": 0.6649286666666666,
+    "profit_factor": 1.3073332622154121,
+    "max_drawdown": 22.448006999999997,
+    "outcome_counts": {
+      "WIN": 14,
+      "LOSS": 16
+    },
+    "entry_bands": {
+      "0.2–0.3": {
+        "total": 4,
+        "wins": 1
+      },
+      "0.3–0.4": {
+        "total": 7,
+        "wins": 1
+      },
+      "0.4–0.5": {
+        "total": 4,
+        "wins": 2
+      },
+      "0.5–0.6": {
+        "total": 5,
+        "wins": 4
+      },
+      "0.6–0.7": {
+        "total": 5,
+        "wins": 4
+      },
+      "0.7–0.8": {
+        "total": 4,
+        "wins": 2
+      },
+      "0.8–0.9": {
+        "total": 1,
+        "wins": 0
+      }
+    },
+    "reason_counts": {
+      "EXIT_STOP": 16,
+      "EXIT_TP": 14
+    }
+  },
+  "live": {
+    "total": 0,
+    "settled_count": 0,
+    "wins": 0,
+    "losses": 0,
+    "win_rate": 0.0,
+    "total_pnl": 0,
+    "avg_pnl": 0.0,
+    "profit_factor": 0.0,
+    "max_drawdown": 0.0,
+    "outcome_counts": {},
+    "entry_bands": {},
+    "reason_counts": {}
+  }
+}
