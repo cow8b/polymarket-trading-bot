@@ -200,7 +200,12 @@ def _boot_bot_node(
         trader_id="BTC-15MIN-INTEGRATED-001",
         logging=_nautilus_logging_config(quiet_console=True),
         data_engine=LiveDataEngineConfig(qsize=6000),
-        exec_engine=LiveExecEngineConfig(qsize=6000),
+        # allow_overfills：Polymarket 市价买单按 USD 计量（quote_quantity），
+        # 成交价优于下单时估价会导致基础币数量超过 Nautilus 预估的
+        # quantity，被误判为"超量成交"而拒收 OrderFilled（2026-07-26
+        # 实例：$2.50 估价 $0.46 → 实际 $0.38 成交 6.58 股，策略永远
+        # 收不到成交事件，持仓失踪）。价格改善方向的 overfill 无害。
+        exec_engine=LiveExecEngineConfig(qsize=6000, allow_overfills=True),
         risk_engine=LiveRiskEngineConfig(bypass=simulation),
         data_clients={POLYMARKET: poly_data_cfg},
         exec_clients={POLYMARKET: poly_exec_cfg},
@@ -379,7 +384,12 @@ def run_integrated_bot(
         trader_id="BTC-15MIN-INTEGRATED-001",
         logging=_nautilus_logging_config(quiet_console=False),
         data_engine=LiveDataEngineConfig(qsize=6000),
-        exec_engine=LiveExecEngineConfig(qsize=6000),
+        # allow_overfills：Polymarket 市价买单按 USD 计量（quote_quantity），
+        # 成交价优于下单时估价会导致基础币数量超过 Nautilus 预估的
+        # quantity，被误判为"超量成交"而拒收 OrderFilled（2026-07-26
+        # 实例：$2.50 估价 $0.46 → 实际 $0.38 成交 6.58 股，策略永远
+        # 收不到成交事件，持仓失踪）。价格改善方向的 overfill 无害。
+        exec_engine=LiveExecEngineConfig(qsize=6000, allow_overfills=True),
         risk_engine=LiveRiskEngineConfig(bypass=simulation),
         data_clients={POLYMARKET: poly_data_cfg},
         exec_clients={POLYMARKET: poly_exec_cfg},

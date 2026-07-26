@@ -450,6 +450,9 @@ class IntegratedBTCStrategy(Strategy):
         # risk engine, and the monotonic deadline for the next portfolio check.
         self._risk_balance_last_synced: Optional[Decimal] = None
         self._risk_balance_next_check: float = 0.0
+        # 实盘钱包现金模型：以交易所同步值为基准（权威），成交事件即时
+        # 增减以消除同步节流（60s）造成的短暂错位。None = 尚未同步过。
+        self._live_wallet_cash: Optional[float] = None
         self.performance_tracker = get_performance_tracker()
         self.learning_engine = get_learning_engine()
         self.trade_history_repository = TradeHistoryRepository()
@@ -1775,7 +1778,26 @@ class IntegratedBTCStrategy(Strategy):
         )
         unrealized_pnl = sum(float(item["unrealized_pnl"]) for item in positions)
         starting_balance = float(getattr(self.risk_engine, "_starting_balance", 0.0) or 0.0)
-        wallet_balance = starting_balance + total_pnl + unrealized_pnl
+        if not self.current_simulation_mode and self._live_wallet_cash is not None:
+            # 实盘：钱包现金（交易所同步 + 成交事件即时调整）已内含全部
+            # 已实现盈亏，权益 = 现金 + 持仓市值。不能再叠加账本累计
+            # 盈亏，否则重复计算（2026-07-26 实例：面板比 Polymarket
+            # 多出约一个 total_pnl）。持仓无报价时按成本价估值。
+            position_value = sum(
+                float(item["qty_tokens"])
+                * (
+                    float(item["last_bid"])
+                    if float(item["last_bid"] or 0.0) > 0
+                    else float(item["entry_price"])
+                )
+                for item in positions
+            )
+            wallet_balance = self._live_wallet_cash + position_value
+            # 推算起始本金（供回撤回放）：当前权益 − 账本累计已实现盈亏
+            # − 未实现盈亏。
+            starting_balance = wallet_balance - total_pnl - unrealized_pnl
+        else:
+            wallet_balance = starting_balance + total_pnl + unrealized_pnl
         running_balance = starting_balance
         peak_balance = starting_balance
         max_drawdown_pct = 0.0
@@ -2342,6 +2364,9 @@ class IntegratedBTCStrategy(Strategy):
             balance = free.as_decimal()
             if balance <= 0:
                 return
+            # 钱包现金模型：每次成功读数都刷新（权威覆盖成交事件的即时
+            # 调整），必须在下面的"未变化早退"之前执行。
+            self._live_wallet_cash = float(balance)
             if balance == self._risk_balance_last_synced:
                 return
             first_sync = self._risk_balance_last_synced is None
@@ -4233,6 +4258,17 @@ class IntegratedBTCStrategy(Strategy):
                 pass
 
         notional = float(fill_price) * float(fill_qty)
+
+        # 钱包现金模型即时调整：买入腿现金减少（本金+手续费），卖出腿
+        # 现金增加（回款−手续费）。随后把同步节流清零，让下一轮定时
+        # 循环尽快用交易所权威读数覆盖校准。
+        if self._live_wallet_cash is not None:
+            if is_exit:
+                self._live_wallet_cash += notional - fill_comm
+            else:
+                self._live_wallet_cash -= notional + fill_comm
+        self._risk_balance_next_check = 0.0
+
         self._record_order_fill(
             mode="live",
             order_id=client_id,

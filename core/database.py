@@ -444,7 +444,8 @@ class TradeHistoryRepository:
 class OrderLifecycleRepository:
     """订单生命周期事实表；用于可重启恢复的执行质量统计。"""
 
-    TERMINAL_STATUSES = {"FILLED", "REJECTED", "DENIED", "CANCELED", "EXPIRED"}
+    # TIMEOUT：提交后长期无终态事件、被超时回收器主动撤单的孤儿单。
+    TERMINAL_STATUSES = {"FILLED", "REJECTED", "DENIED", "CANCELED", "EXPIRED", "TIMEOUT"}
 
     def __init__(self, engine: Optional[Engine] = None):
         self.engine = initialize_database(engine=engine)
