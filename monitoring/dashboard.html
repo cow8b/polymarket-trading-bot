@@ -174,7 +174,7 @@
     /* min-height 移除：决策树折叠时不再占住 630px 空白 */
     .main-bottom { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 6px; }
     .main-bottom > .panel:nth-child(2) { display: none; }
-    .footer-grid { display: grid; grid-template-columns: 1fr 1.08fr 1.12fr; gap: 6px; margin-top: 6px; min-height: 268px; }
+    .footer-grid { display: grid; grid-template-columns: 1fr 1.08fr 1.12fr; gap: 6px; margin-top: 6px; }
     .panel { padding: 6px; position: relative; overflow: hidden; background: linear-gradient(180deg, #f7f0df, #ece4d4); }
     .panel h2 {
       margin: -6px -6px 6px;
@@ -315,9 +315,9 @@
     .focus-main { font-size: 13px; font-weight: 900; }
     .focus-pnl { font-size: 26px; font-weight: 900; text-align: center; text-shadow: 0 0 12px currentColor; }
     .focus-desc { color: var(--muted); font-size: 10px; text-align: right; }
-    /* 三栏等高：面板纵向弹性布局，曲线与日志内容区自动伸展到与
-       实时分析（4 行指标格）同高 */
-    .footer-grid .panel { min-height: 268px; display: flex; flex-direction: column; }
+    /* 三栏等高：面板定高（实时分析 4 行 × 68px 指标格 + 表头恰好占满），
+       日志流内容超出后内部滚动，不再把整行撑高 */
+    .footer-grid .panel { height: 316px; display: flex; flex-direction: column; overflow: hidden; }
     .footer-grid .panel h2 { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex: 0 0 auto; }
     .footer-head-stat { color: #d9d2c2; font-size: 10px; letter-spacing: 1px; font-weight: 400; }
     .footer-head-stat b { color: #fff; font-size: 10px; }
@@ -328,11 +328,11 @@
     .footer-pnl-summary b { margin-left: 5px; color: var(--ink); font-size: 17px; }
     .footer-pnl-summary b.pnl-pos { color: var(--pnl-pos); }
     .footer-pnl-summary b.pnl-neg { color: var(--pnl-neg); }
-    .footer-chart { position: relative; flex: 1; min-height: 216px; margin-top: 4px; border: 1px solid rgba(22,19,15,.42); background: linear-gradient(180deg, #f5efdf, #ded8cb); overflow: hidden; }
+    .footer-chart { position: relative; flex: 1; min-height: 0; margin-top: 4px; border: 1px solid rgba(22,19,15,.42); background: linear-gradient(180deg, #f5efdf, #ded8cb); overflow: hidden; }
     .footer-chart canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
     /* 8 格 = 2 列 × 4 行（原 repeat(2,106px) 只为 4 格设计，扩格后
        多出的行按内容自撑，三栏高度失配） */
-    .analytics-grid { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 106px; gap: 0; border: 1px solid rgba(22,19,15,.42); background: #f3eddd; }
+    .analytics-grid { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: 68px; gap: 0; border: 1px solid rgba(22,19,15,.42); background: #f3eddd; }
     .analytics-cell { min-width: 0; overflow: hidden; border-right: 1px dashed rgba(22,19,15,.28); border-bottom: 1px dashed rgba(22,19,15,.28); }
     .analytics-cell:nth-child(2n) { border-right: 0; }
     .analytics-cell:nth-last-child(-n+2) { border-bottom: 0; }
@@ -340,8 +340,8 @@
     .analytics-label b { color: var(--ink); font-size: 11px; }
     .analytics-label b.pnl-pos { color: var(--pnl-pos); }
     .analytics-label b.pnl-neg { color: var(--pnl-neg); }
-    .analytics-cell canvas { width: 100%; height: 79px; }
-    .logs { flex: 1; height: auto; min-height: 231px; background: rgba(255,255,255,.2); border: 1px solid rgba(22,19,15,.42); padding: 6px; font-size: 11px; line-height: 1.4; }
+    .analytics-cell canvas { width: 100%; height: 40px; }
+    .logs { flex: 1; height: auto; min-height: 0; background: rgba(255,255,255,.2); border: 1px solid rgba(22,19,15,.42); padding: 6px; font-size: 11px; line-height: 1.4; }
     .log-line { padding: 1px 0; color: var(--muted); }
     .log-line b { color: var(--yellow); }
     .log-line .buy { color: var(--green); } .log-line .sell { color: var(--red); }
