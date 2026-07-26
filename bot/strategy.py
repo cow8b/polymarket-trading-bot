@@ -319,6 +319,22 @@ class IntegratedBTCStrategy(Strategy):
             )
         except (TypeError, ValueError):
             self._max_chase_delta = 0.12
+        # 逆势共识门槛：买入低于 ceiling 的弱方 = 对赌市场隐含 ≥60% 的
+        # 共识，要求至少 min_signals 个信号同向才放行（2026-07-26 实测：
+        # 该子类 11 笔 2 胜 8 负转负，其中信号数 <4 的 5 笔全部亏损）。
+        # 仅作用于 fusion 回退路径；ML 激活后的入场不受限。
+        try:
+            self._contrarian_price_ceiling = max(
+                0.0, min(0.5, float(os.getenv("CONTRARIAN_PRICE_CEILING", "0.40")))
+            )
+        except (TypeError, ValueError):
+            self._contrarian_price_ceiling = 0.40
+        try:
+            self._contrarian_min_signals = max(
+                1, int(float(os.getenv("CONTRARIAN_MIN_SIGNALS", "4")))
+            )
+        except (TypeError, ValueError):
+            self._contrarian_min_signals = 4
 
         # Per-market state, keyed by market slug.
         #   _market_direction:   slug -> "long"|"short"  (first trade's direction)
@@ -3138,6 +3154,32 @@ class IntegratedBTCStrategy(Strategy):
                         )
                     self._finish_decision_cycle(is_simulation, "SKIP — anti-chase")
                     return
+
+        # 3. 逆势共识门槛 — 低价弱方是对市场共识的对赌，需要更广的信号
+        #    同向支持（配置见 __init__；ML 激活后 fused 为 None 时不适用）。
+        if (
+            fused is not None
+            and held_entry_price < self._contrarian_price_ceiling
+            and int(getattr(fused, "num_signals", 0) or 0) < self._contrarian_min_signals
+        ):
+            n_sig = int(getattr(fused, "num_signals", 0) or 0)
+            self._log_step(
+                "STEP 5", "EXECUTION GATE — CONTRARIAN CONSENSUS",
+                [
+                    ("Entry price", f"{held_entry_price:.4f}  <  {self._contrarian_price_ceiling:.2f}"),
+                    ("Signals",     f"{n_sig}  <  需 {self._contrarian_min_signals}"),
+                    ("Decision",    "SKIP — 逆势单信号共识不足"),
+                ],
+                is_simulation=is_simulation,
+            )
+            if feature_vector is not None:
+                self.ml_engine.record_trade(
+                    market_slug=active_slug,
+                    poly_price=poly_price,
+                    feature_vector=feature_vector,
+                )
+            self._finish_decision_cycle(is_simulation, "SKIP — contrarian consensus")
+            return
 
         # Risk engine
         is_valid, error = self.risk_engine.validate_new_position(
