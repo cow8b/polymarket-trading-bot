@@ -2596,8 +2596,16 @@ class IntegratedBTCStrategy(Strategy):
             try:
                 poly_book = self.orderbook_processor.fetch_order_book(self._yes_token_id)
                 if poly_book:
-                    bid_vol = self.orderbook_processor._parse_levels(poly_book.get("bids", []))
-                    ask_vol = self.orderbook_processor._parse_levels(poly_book.get("asks", []))
+                    # 与信号处理器同口径：最优 N 档 + 价带内份额（旧 _parse_levels
+                    # 已在订单簿双 bug 修复中移除）。
+                    top_bids = self.orderbook_processor._nearest_levels(
+                        poly_book.get("bids", []), is_bid=True
+                    )
+                    top_asks = self.orderbook_processor._nearest_levels(
+                        poly_book.get("asks", []), is_bid=False
+                    )
+                    bid_vol = self.orderbook_processor._band_share_volume(top_bids)
+                    ask_vol = self.orderbook_processor._band_share_volume(top_asks)
                     total = bid_vol + ask_vol
                     if total > 0:
                         metadata["poly_ob_imbalance"] = (bid_vol - ask_vol) / total
