@@ -4827,10 +4827,11 @@ class IntegratedBTCStrategy(Strategy):
     def on_order_rejected(self, event) -> None:
         client_id = str(getattr(event, "client_order_id", "?"))
         reason = str(getattr(event, "reason", ""))
+        is_exit_order = client_id in self._pending_exits
         self._record_order_terminal(
             mode="live",
             order_id=client_id,
-            role="exit" if client_id in self._pending_exits else "entry",
+            role="exit" if is_exit_order else "entry",
             status="REJECTED",
             reason=reason,
         )
@@ -4838,9 +4839,12 @@ class IntegratedBTCStrategy(Strategy):
         is_fak = any(
             kw in reason.lower() for kw in ("no orders found", "fak", "no match")
         )
-        if is_fak:
+        if is_fak and not is_exit_order:
+            # 仅入场单被拒时清入场冷却；退出单被拒不解锁新开仓。
             self._last_entry_ts = 0.0
             note = "no liquidity (FAK) — cooldown cleared; will retry on next tick"
+        elif is_fak:
+            note = "no liquidity (FAK) — exit will retry with backoff"
         else:
             note = "venue rejected order — see reason"
 
@@ -4904,9 +4908,15 @@ class IntegratedBTCStrategy(Strategy):
             position = self._open_positions[entry_id]
             position["exit_in_flight"] = False
             position["exit_order_id"] = None
+            # 指数退避：1s → 2s → 4s → 8s → 15s（封顶）。防止死盘（买方
+            # 无单）时以 tick 频率无限拒单-重试刷爆交易所 API 与日志。
+            reject_count = int(position.get("exit_reject_count", 0)) + 1
+            position["exit_reject_count"] = reject_count
+            backoff = min(2 ** reject_count, 15)
+            position["exit_retry_after_ts"] = time.time() + backoff
             logger.warning(
                 f"Exit order {client_id} failed for position {entry_id} — "
-                f"will retry on next tick"
+                f"reject #{reject_count}, retry in {backoff}s"
             )
 
     # ── Live position exits ──────────────────────────────────────────────────
@@ -4946,6 +4956,27 @@ class IntegratedBTCStrategy(Strategy):
             if position["exit_in_flight"]:
                 continue
             if position["filled_qty"] <= 0:
+                continue
+
+            # FAK 拒单退避窗口内不重试（含 TIME-EXIT）。
+            retry_after = float(position.get("exit_retry_after_ts", 0.0) or 0.0)
+            if retry_after and time.time() < retry_after:
+                continue
+
+            # 死盘放弃：连续多次"无单可成交"且 bid 已是尘埃价，说明市场
+            # 已定局、买方不会回来。停止挣扎，持有到结算——结算收割器会
+            # 按 Chainlink 结果正确入账，结果与卖出几美分几乎无差。
+            if (
+                int(position.get("exit_reject_count", 0)) >= 8
+                and float(bid) <= 0.05
+            ):
+                if not position.get("exit_hold_to_settle_logged"):
+                    position["exit_hold_to_settle_logged"] = True
+                    logger.warning(
+                        f"EXIT ABANDONED for {position.get('label', '')} "
+                        f"(entry {entry_id}): {position['exit_reject_count']} 次 FAK "
+                        f"拒单且 bid=${float(bid):.2f} 为尘埃价 — 持有到结算"
+                    )
                 continue
 
             # Force-sell at the 14:30 mark (30s before settlement).
